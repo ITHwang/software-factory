@@ -1,5 +1,7 @@
 # Python Toolchain Setup
 
+> Last updated: 2026-05-09
+
 ## Setup
 
 Run these in order from a freshly-initialized uv project (see `setup-environments.md`).
