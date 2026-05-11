@@ -1,8 +1,21 @@
 # Python Environment Setup
 
-> Last updated: 2026-05-09
+> Last updated: 2026-05-11
+
+## TL;DR
 
 How to set up a Python development environment on macOS or Ubuntu using a layered tool stack: `brew`/`apt` for system packages, `mise` for the Python runtime, and `uv` for project dependencies.
+
+**Use this when:**
+- setting up a fresh development machine
+- onboarding a new repo and the Python runtime / `uv` aren't installed
+- standardizing tooling across macOS and Ubuntu contributors
+
+**Don't use this for:**
+- linter / formatter / typechecker / CI setup → `./setup-toolchains.md`
+- repo-wide Python conventions (version, frameworks) → `./python-guidelines.md`
+
+## Table of Contents
 
 | Phase | Section |
 |-------|---------|

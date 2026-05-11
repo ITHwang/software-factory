@@ -1,6 +1,20 @@
 # Pragmatic SQL-First Persistence (SQLAlchemy + Raw SQL)
 
-> Last updated: 2026-05-10
+> Last updated: 2026-05-11
+
+## TL;DR
+
+How to build a SQL-first async persistence layer: SQLAlchemy 2.x as infrastructure (engine, sessions, schema metadata, Alembic), raw SQL via `text()` as the application query interface, a `SqlMapper` for function-name validation, and a request-scoped `RDBClient` that just executes raw SQL.
+
+**Use this when:**
+- the team wants explicit SQL with bound parameters, not an ORM query builder
+- you need Alembic migrations driven by schema-metadata-only ORM models
+- you need async Postgres access with a request-scoped session
+
+**Don't use this for:**
+- vector similarity search → `./milvus.md`
+- object storage → `./s3-client.md`
+- caching layer → `./cache.md`
 
 How to build a SQL-first persistence layer in async Python: SQLAlchemy 2.x as
 infrastructure (engine, sessions, schema metadata, Alembic), raw SQL via
@@ -9,6 +23,8 @@ validation, and a request-scoped `RDBClient` that just executes raw SQL.
 
 This guide is async-first. There is no sync variant.
 
+
+## Table of Contents
 
 | Phase         | Section                                                                                                                    |
 | ------------- | -------------------------------------------------------------------------------------------------------------------------- |
@@ -111,6 +127,8 @@ A query builder must justify itself.
 Raw SQL is the default.
 ```
 
+See also: [SQLAlchemy ORM query guide (the path we're not taking)](https://docs.sqlalchemy.org/en/20/orm/queryguide/select.html).
+
 ## ORM Models = Schema Metadata Only
 
 ORM models exist to populate `Base.metadata` so Alembic autogenerate can detect
@@ -174,6 +192,8 @@ Two things are conspicuously absent:
   Since DTOs are separate Pydantic classes anyway and we never use the unified
    model for queries, SQLModel adds no value over pure SQLAlchemy. Use
    SQLAlchemy directly.
+
+See also: [Python `uuid`](https://docs.python.org/3.14/library/uuid.html).
 
 ## Engine & Session Lifecycle
 
@@ -261,6 +281,8 @@ Putting `Depends(get_session)` in route signatures inverts this: the HTTP
 layer becomes responsible for persistence-layer lifecycle, and the layer
 boundary breaks down.
 
+See also: [SQLAlchemy asyncio extension](https://docs.sqlalchemy.org/en/20/orm/extensions/asyncio.html), [SQLAlchemy PostgreSQL dialect](https://docs.sqlalchemy.org/en/20/dialects/postgresql.html), [asyncpg](https://magicstack.github.io/asyncpg/current/).
+
 ## The RDBClient
 
 The `RDBClient` is request-scoped, instance-based, and owns the session
@@ -318,6 +340,8 @@ job.
 - `**@transactional` decorator** wraps commit/rollback at the call boundary.
 Multi-statement transactions across repositories are achieved by entering
 a transaction on the shared session before calling repository methods.
+
+See also: [SQLAlchemy `text()` (textual SQL)](https://docs.sqlalchemy.org/en/20/core/connections.html#using-textual-sql).
 
 ## The SqlMapper
 
@@ -569,6 +593,8 @@ alembic current
 alembic history
 ```
 
+See also: [Alembic docs](https://alembic.sqlalchemy.org/en/latest/), [Alembic autogenerate](https://alembic.sqlalchemy.org/en/latest/autogenerate.html).
+
 ## Testing Philosophy
 
 API tests are the default test layer. Unit tests are not part of this
@@ -637,14 +663,4 @@ The pattern is defined as much by what it forbids as by what it embraces:
   sibling `*.sql` file and is loaded by `SqlMapper`. Inline strings
    bypass the name-match validation and scatter SQL across Python files.
 
-## References
-
-- [https://docs.sqlalchemy.org/en/20/orm/extensions/asyncio.html](https://docs.sqlalchemy.org/en/20/orm/extensions/asyncio.html)
-- [https://docs.sqlalchemy.org/en/20/orm/queryguide/select.html](https://docs.sqlalchemy.org/en/20/orm/queryguide/select.html)
-- [https://docs.sqlalchemy.org/en/20/core/connections.html#using-textual-sql](https://docs.sqlalchemy.org/en/20/core/connections.html#using-textual-sql)
-- [https://docs.sqlalchemy.org/en/20/dialects/postgresql.html](https://docs.sqlalchemy.org/en/20/dialects/postgresql.html)
-- [https://magicstack.github.io/asyncpg/current/](https://magicstack.github.io/asyncpg/current/)
-- [https://alembic.sqlalchemy.org/en/latest/](https://alembic.sqlalchemy.org/en/latest/)
-- [https://alembic.sqlalchemy.org/en/latest/autogenerate.html](https://alembic.sqlalchemy.org/en/latest/autogenerate.html)
-- [https://docs.python.org/3.14/library/uuid.html](https://docs.python.org/3.14/library/uuid.html)
 

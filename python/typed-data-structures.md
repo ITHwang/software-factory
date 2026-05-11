@@ -1,9 +1,25 @@
 # Choosing Typed Data Structures
 
-> Last updated: 2026-05-10
+> Last updated: 2026-05-11
+
+## TL;DR
+
+How to pick the right typed container in Python: `dict[K, V]`, `TypedDict`, `dataclass`, `BaseModel`, `tuple`, `namedtuple`, `Literal`, `Enum`, `Protocol`.
+
+**Use this when:**
+- modelling structured data and unsure which container to reach for
+- choosing between `TypedDict` and `dataclass` for an internal record type
+- deciding when validation (`BaseModel`) is worth the runtime cost
+
+**Don't use this for:**
+- SQL-row models → `./sqlalchemy.md` (uses `SQLModel`)
+- LangGraph agent state schemas → `./langgraph.md#building-a-graph`
+- LangChain tool input schemas → `./langchain.md#tool-io`
 
 Python offers `dict[K, V]`, `TypedDict`, `dataclass`, `BaseModel`, `tuple`, `namedtuple`, `Literal`, `Enum`, and `Protocol` for representing structured data.
 
+
+## Table of Contents
 
 | Phase               | Section                                                                                                                                                                                                                                                                                                                |
 | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

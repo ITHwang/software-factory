@@ -1,6 +1,31 @@
 # Python Toolchain Setup
 
-> Last updated: 2026-05-09
+> Last updated: 2026-05-11
+
+## TL;DR
+
+How to wire ruff (lint + format), mypy (typecheck), pre-commit (git hooks), and GitHub Actions (CI) into a uv project. Pyright is editor-only and intentionally outside this stack.
+
+**Use this when:**
+- adding linting/formatting/typecheck/CI to a new Python project
+- tightening an existing project's quality bar
+- standardizing tool configs across the repo
+
+**Don't use this for:**
+- installing the Python runtime / setting up `uv` itself → `./setup-environments.md`
+- language-level conventions (version, framework choices) → `./python-guidelines.md`
+- API test patterns → `./python-tests.md`
+
+## Table of Contents
+
+| Section |
+|---------|
+| [Setup](#setup) |
+| [Stack At A Glance](#stack-at-a-glance) |
+| [Project Structure](#project-structure) |
+| [Tool Config (pyproject.toml)](#tool-config-pyprojecttoml) |
+| [Tools](#tools) |
+| [Best Practices](#best-practices) |
 
 ## Setup
 

@@ -1,6 +1,20 @@
 # Provider-Neutral LLM Calls (LiteLLM)
 
-> Last updated: 2026-05-09
+> Last updated: 2026-05-11
+
+## TL;DR
+
+How to use LiteLLM from an async FastAPI backend for direct, provider-neutral prompt-to-response LLM calls: client wrapping, retries, streaming, structured output, error classification, usage extraction.
+
+**Use this when:**
+- one-shot LLM tasks: summarization, classification, translation, extraction, rewriting
+- you need provider-neutral routing across OpenAI/Anthropic/Bedrock/Azure/etc.
+- you need fine-grained retry, error classification, or token-usage accounting on direct calls
+
+**Don't use this for:**
+- tool-using agent loops with multi-step reasoning → `./langchain.md`
+- multi-graph topologies, `Send` fan-out, reducers → `./langgraph.md`
+- tracing/observability → `./langfuse.md` (attaches as a callback)
 
 How to use LiteLLM from an async FastAPI backend. `LiteLLMClient` is the
 implementation of the LLM client layer for direct, prompt-to-response tasks:
@@ -12,6 +26,8 @@ The backend shape is route → service/use-case → `LiteLLMClient`. The client
 owns provider-neutral LiteLLM calls, retries, streaming, structured output,
 error classification, and usage extraction. Tools live on the agent layer and
 are not managed here.
+
+## Table of Contents
 
 | Phase | Section |
 |-------|---------|
@@ -35,6 +51,8 @@ are not managed here.
 | Usage | Read `response.usage` or chunk usage when included by the provider |
 | LangChain agent integration | Use `langchain_litellm.ChatLiteLLM` directly; see [`./langchain.md`](./langchain.md) |
 | API test boundary | Mock `LiteLLMClient`, not LiteLLM itself |
+
+See also: [LiteLLM docs home](https://docs.litellm.ai/), [LiteLLM repo](https://github.com/BerriAI/litellm).
 
 ## When To Use
 
@@ -213,6 +231,8 @@ Never call `litellm.completion()` from an async FastAPI request handler. It is a
 blocking call and will stall the event loop. Reserve sync completion for CLI
 scripts, migrations, and offline jobs.
 
+See also: [LiteLLM completion input](https://docs.litellm.ai/docs/completion/input), [LiteLLM request/response patterns](https://docs.litellm.ai/docs/guides/core_request_response_patterns).
+
 ## Structured Output
 
 Use structured output when the service needs fields, flags, scores, or other
@@ -253,6 +273,8 @@ this translation as the default.
 > [Inspecting Provider Requests](#inspecting-provider-requests)). The
 > translation is mostly transparent but can drift on nested schemas, optional
 > fields, and tool calling.
+
+See also: [LiteLLM JSON mode](https://docs.litellm.ai/docs/completion/json_mode), [LangChain structured output](https://docs.langchain.com/oss/python/langchain/structured-output).
 
 ## Inspecting Provider Requests
 
@@ -433,6 +455,8 @@ integration.
 Do not build direct prompt-to-answer flows with LangChain just to call the LLM.
 That adds an agent framework where a provider-neutral client is enough.
 
+See also: [LiteLLM tool integrations](https://docs.litellm.ai/docs/guides/tools_integrations), [`langchain-litellm` repo](https://github.com/langchain-ai/langchain-litellm).
+
 ## FastAPI Example
 
 Route -> service -> client.
@@ -587,13 +611,3 @@ API tests should never call real LiteLLM providers.
 | Real LLM calls in API tests | Override the client boundary |
 | Adopting a new provider without checking the translated request | Enable LiteLLM verbose logging once to confirm `response_format` and tool params translate correctly, then disable |
 
-## References
-
-- https://docs.litellm.ai/
-- https://docs.litellm.ai/docs/completion/input
-- https://docs.litellm.ai/docs/completion/json_mode
-- https://docs.litellm.ai/docs/guides/core_request_response_patterns
-- https://docs.litellm.ai/docs/guides/tools_integrations
-- https://github.com/BerriAI/litellm
-- https://github.com/langchain-ai/langchain-litellm
-- https://docs.langchain.com/oss/python/langchain/structured-output
