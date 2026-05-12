@@ -1,6 +1,6 @@
 # LangChain
 
-> Last updated: 2026-05-11
+> Last updated: 2026-05-12
 
 ## TL;DR
 
@@ -121,68 +121,9 @@ HTTP request
   -> tools / outbound gateways
 ```
 
-The container shape follows [`./dependency-injector.md`](./dependency-injector.md).
-The important ownership rule: settings are data, `AgentFactory` is the actor
-that constructs the agent, and the container decides what gets injected.
+The important ownership rule: settings are data, `AgentFactory` is the actor that constructs the agent, and the container decides what gets injected.
 
-```python
-# containers.py
-from dependency_injector import containers, providers
-
-from langchain_litellm import ChatLiteLLM
-
-from .agents import AgentFactory, AgentGateway, AgentSettings, build_middlewares
-from .litellm_client import LiteLLMClient, LiteLLMSettings
-from .services import AskService
-from .search import SearchGateway
-
-
-class Container(containers.DeclarativeContainer):
-    config = providers.Configuration(yaml_files=["configs/app.yaml"])
-
-    llm_settings = providers.Factory(
-        LiteLLMSettings,
-        model=config.llm.model,
-        temperature=config.llm.temperature.as_float(),
-        max_tokens=config.llm.max_tokens.as_int(),
-        timeout_seconds=config.llm.timeout_seconds.as_int(),
-        provider_kwargs=config.llm.provider_kwargs,
-    )
-    litellm_client = providers.Singleton(LiteLLMClient, settings=llm_settings)
-    agent_model = providers.Singleton(
-        ChatLiteLLM,
-        model=config.llm.model,
-        temperature=config.llm.temperature.as_float(),
-        max_tokens=config.llm.max_tokens.as_int(),
-        request_timeout=config.llm.timeout_seconds.as_int(),
-    )
-
-    search_gateway = providers.Singleton(
-        SearchGateway,
-        base_url=config.search.base_url,
-    )
-    agent_settings = providers.Factory(
-        AgentSettings,
-        system_prompt=config.agent.system_prompt,
-        max_iterations=config.agent.max_iterations.as_int(),
-        max_tool_calls=config.agent.max_tool_calls.as_int(),
-    )
-    agent_middlewares = providers.Callable(
-        build_middlewares,
-        settings=agent_settings,
-    )
-    agent_factory = providers.Factory(
-        AgentFactory,
-        model=agent_model,
-        search_gateway=search_gateway,
-        settings=agent_settings,
-        middlewares=agent_middlewares,
-    )
-    agent = providers.Singleton(lambda factory: factory.build(), agent_factory)
-    agent_gateway = providers.Factory(AgentGateway, agent=agent)
-
-    ask_service = providers.Factory(AskService, agent_gateway=agent_gateway)
-```
+Container wiring (the multi-provider agent chain — model, gateways, agent factory, top-level service) lives in [./dependency-injector.md#langchain](./dependency-injector.md#langchain).
 
 ## Core Pattern
 
@@ -235,8 +176,11 @@ def build_search_tool(search_gateway: SearchGateway):
         return "\n".join(hits)
 
     return search_docs
+```
 
+**AgentFactory** — **Purpose**: constructs and returns a compiled LangChain agent with model, tools, and middleware wired in. **Responsibilities**: own model selection; own tool registration; own middleware ordering; produce a Singleton-compatible compiled agent. **Must not**: be invoked per-request (agent compilation is expensive); own runtime business logic.
 
+```python
 class AgentFactory:
     def __init__(
         self,
@@ -251,19 +195,14 @@ class AgentFactory:
         self._settings = settings
         self._middlewares = list(middlewares)
 
-    def build(self):
-        return create_agent(
-            name="ask_agent",
-            model=self._model,
-            tools=[build_search_tool(self._search_gateway)],
-            system_prompt=self._settings.system_prompt,
-            response_format=AgentAnswer,
-            middleware=self._middlewares,
-        )
+    def build(self) -> CompiledAgent: ...
+```
 
+**AgentGateway** — **Purpose**: request-scoped facade in front of a shared compiled agent; turns service-layer questions into agent invocations. **Responsibilities**: format service input into agent input; call `ainvoke`; map agent output into the service-layer return type; raise on agent errors. **Must not**: compile its own agent (the compiled agent is injected); store per-call state across requests.
 
+```python
 class AgentGateway:
-    def __init__(self, agent) -> None:
+    def __init__(self, agent: CompiledAgent) -> None:
         self._agent = agent
 
     async def answer(
@@ -272,16 +211,7 @@ class AgentGateway:
         request_id: str,
         user_id: str,
         question: str,
-    ) -> AgentAnswer:
-        state = await self._agent.ainvoke(
-            {"messages": [{"role": "user", "content": question}]},
-            config={
-                "configurable": {"thread_id": request_id},
-                "run_id": request_id,
-                "metadata": {"user_id": user_id},
-            },
-        )
-        return state["structured_response"]
+    ) -> AgentAnswer: ...
 ```
 
 The agent path uses `langchain_litellm.ChatLiteLLM` directly — no custom adapter.

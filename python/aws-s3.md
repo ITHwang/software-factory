@@ -1,6 +1,6 @@
 # AWS S3
 
-> Last updated: 2026-05-11
+> Last updated: 2026-05-12
 
 ## TL;DR
 
@@ -58,6 +58,54 @@ uv add --dev types-aiobotocore-s3   # optional: type stubs for the underlying cl
 See also: `[aioboto3` changelog]([https://aioboto3.readthedocs.io/en/latest/changelog.html](https://aioboto3.readthedocs.io/en/latest/changelog.html)), `[aiobotocore` repo]([https://github.com/aio-libs/aiobotocore](https://github.com/aio-libs/aiobotocore)), `[types-aiobotocore-s3` on PyPI]([https://pypi.org/project/types-aiobotocore-s3/](https://pypi.org/project/types-aiobotocore-s3/)).
 
 ## The Wrapper Shape
+
+### Purpose
+
+An async S3 wrapper around `aioboto3` that owns the session-and-client lifecycle plumbing and exposes a narrow surface — upload, download, presign, exists, delete — to repositories and services.
+
+### Responsibilities
+
+- Hold a reference to the already-opened low-level `aioboto3` client provided by the container, plus the active region and (after `set_bucket`) an optional default-bucket name.
+- Surface per-call S3 operations through short, intention-revealing methods.
+- Validate the default bucket via `head_bucket` and resolve per-call bucket arguments against it.
+- Generate presigned GET / PUT URLs with the right `signature_version` and addressing style.
+- Map `botocore.ClientError` codes to wrapper-level booleans (`object_exists`) or domain errors; never silently swallow non-404 failures.
+- **Must not** own credential discovery — delegate to the boto credential chain and environment.
+- **Must not** own bucket-naming conventions — callers decide names; the wrapper only validates and resolves.
+- **Must not** be per-request — one `aioboto3.Session` per process; the per-request unit is the client context manager around it.
+
+### Lifecycle
+
+- Scope: app-scoped `Singleton` for the wrapper class itself; the `aioboto3.Session` it depends on is also app-scoped `Singleton`; the low-level client is opened by the container as a `Resource` (async context manager) per process.
+- Created by: the DI container at startup, after the `aioboto3.Session` `Singleton` resolves and the client `Resource` opens.
+- Shared by: repository adapters (`S3UserRepository`, `S3DocumentRepository`, …) injected into business-layer services.
+- Cleaned up by: the container — it closes the client `Resource` at shutdown. The `aioboto3.Session` has no explicit teardown; it dies with the process.
+
+### Relationships
+
+```text
+[App Scope]
+    ├── [aioboto3.Session]      (singleton)
+    └── [aioboto3 S3 client]    (singleton Resource, async context manager)
+            │ injected into
+            ▼
+       [S3Client]               (singleton wrapper)
+            │ injected into
+            ▼
+       [S3*Repository adapters] (singleton, implement business-layer ports)
+            │ injected into
+            ▼
+       [Services]
+```
+
+### Constraints
+
+- One `aioboto3.Session` per process; never instantiate per request or per event-loop spin-up (except in tests that own their loop).
+- Never instantiated by FastAPI routes; routes depend on repository ports, not on `S3Client`.
+- Never accepts raw bucket names from untrusted input without going through bucket validation / default-bucket resolution.
+- Stateless beyond the held client, region, and default-bucket name — no per-request mutable state on the wrapper.
+
+---
 
 - `S3Client` is a single class. It holds the opened low-level `aioboto3` client, the active region, and (after `set_bucket`) an optional default-bucket name.
 - The wrapper does **not** own the `aioboto3.Session` or the client async lifecycle. The DI container opens the client (an async context manager) once via `providers.Resource` and hands the already-opened object to the wrapper.
@@ -123,24 +171,9 @@ See also: [boto3 `head_object](https://docs.aws.amazon.com/boto3/latest/referenc
 ## Wiring Through The Container
 
 - The wrapper expects an already-opened `aioboto3` client. The DI container holds the session, opens the client, and constructs the wrapper.
-- `providers.Resource` opens the low-level client on startup and closes it on shutdown. `providers.Factory` builds a fresh `S3Client` wrapper per injection (cheap — no I/O state of its own).
-- For request-scoped clients, swap to the request-scoped resource provider — see `[./dependency-injector.md](./dependency-injector.md)`.
+- Architectural shape: the container owns the `aioboto3.Session` and the low-level S3 client's async-context lifecycle; the wrapper itself is stateless plumbing on top.
 
-```python
-async def init_s3_client(
-    session, region
-): ...  # opens the client as an async context manager
-
-
-class Container(containers.DeclarativeContainer):
-    aioboto_session = providers.Singleton(aioboto3.Session)
-    s3_low_level = providers.Resource(
-        init_s3_client, session=aioboto_session, region=config.aws.region
-    )
-    s3_client = providers.Factory(
-        S3Client, client=s3_low_level, region=config.aws.region
-    )
-```
+Container wiring (aioboto3 Session `Singleton` + per-request S3 client `Resource`) lives in [./dependency-injector.md#aws-s3](./dependency-injector.md#aws-s3).
 
 See also: `[./dependency-injector.md](./dependency-injector.md)`, [Dependency Injector — Resource provider](https://python-dependency-injector.ets-labs.org/providers/resource.html), `[aioboto3` README]([https://github.com/terricain/aioboto3#example](https://github.com/terricain/aioboto3#example)).
 

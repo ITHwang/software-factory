@@ -1,12 +1,12 @@
 # Langfuse
 
-> Last updated: 2026-05-11
+> Last updated: 2026-05-12
 
 ## TL;DR
 
 Langfuse covers two concerns in this stack: **prompt management** (versioned prompts edited outside the codebase) and **tracing** (LLM/agent observability). Treat them as independent.
 
-- **Prompt management** sits behind a `PromptGateway` Protocol with substitutable implementations (`LangfusePromptGateway`, `LocalPromptGateway`). The business layer composes fallback when desired.
+- **Prompt management is an adapter-internal concern.** Domain ports are capability-oriented (`TextSummarizer.summarize(text) -> str`); the adapter (`OpenAITextSummarizer`, etc.) loads its prompt template from Langfuse or a local YAML file and constructs its own LLM client. See [./python-backend-architecture.md](./python-backend-architecture.md) for the port/adapter pattern.
 - **Tracing uses the Langfuse SDK directly** — no gateway. Three modes:
   - `CallbackHandler` for LangChain / LangGraph runs (the easy default for agents).
   - `@observe` decorator for function-scoped spans (the default high-level pattern).
@@ -46,9 +46,8 @@ Targets **Langfuse Python SDK v4** ([overview](https://langfuse.com/docs/observa
 | ---------------------- | -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
 | Python package         | `langfuse` (v4)                                                            | [SDK overview](https://langfuse.com/docs/observability/sdk/python/overview)                                  |
 | Client                 | `from langfuse import get_client`                                          | [Python API reference](https://python.reference.langfuse.com)                                                |
-| Prompt fetch           | `langfuse.get_prompt(name, type="chat", label=..., cache_ttl_seconds=...)` | [Prompt management](https://langfuse.com/docs/prompt-management/get-started)                                 |
-| Prompt variables       | `{{variable}}` → `prompt.compile(**variables)`                             | [Version control](https://langfuse.com/docs/prompt-management/features/prompt-version-control)               |
-| Cache TTL              | SDK default 60s; override per fetch                                        | [Caching](https://langfuse.com/docs/prompt-management/features/caching)                                      |
+| Prompt fetch (inside adapter) | `langfuse.get_prompt(name, type="chat", label=..., cache_ttl_seconds=...)` + `prompt.compile(**variables)` | See [Prompt Management](#prompt-management) |
+| Cache TTL              | SDK default 60s; override per fetch                                        | See [Prompt Management](#prompt-management)                                                                  |
 | LangChain trace        | `from langfuse.langchain import CallbackHandler`                           | [LangChain integration](https://langfuse.com/docs/integrations/langchain/tracing)                            |
 | Function trace         | `from langfuse import observe` → `@observe()`                              | [Observe wrapper](https://langfuse.com/docs/observability/sdk/instrumentation#observe-wrapper)               |
 | Manual span            | `langfuse.start_as_current_observation(as_type="span", ...)`               | [Manual observations](https://langfuse.com/docs/observability/sdk/instrumentation#manual-observations)       |
@@ -59,9 +58,7 @@ Targets **Langfuse Python SDK v4** ([overview](https://langfuse.com/docs/observa
 
 ## When To Use
 
-Reach for Langfuse when prompt iteration or observability needs to be independent of application code deploys. Skip it in prototypes where prompts are stable and tracing isn't yet needed; add it later behind an injectable prompt boundary and direct SDK calls when prompt changes or trace inspection become part of the operating model.
-
-See also: [Langfuse observability — get started](https://langfuse.com/docs/observability/get-started).
+Reach for Langfuse when prompt iteration or observability needs to be independent of application code deploys. Skip it in prototypes where prompts are stable and tracing isn't yet needed; add it later behind a capability-oriented port (`TextSummarizer`, `Translator`, ...) whose adapter reads its prompt from Langfuse — and direct SDK calls for tracing — when prompt changes or trace inspection become part of the operating model.
 
 ## SDK Usage Modes
 
@@ -102,32 +99,53 @@ Use the correct regional or self-hosted `LANGFUSE_BASE_URL`. With no credentials
 
 ## Prompt Management
 
-Prompt fetching and compilation sit behind a `PromptGateway` Protocol so the business layer can swap implementations (Langfuse, local, future stores).
+Don't abstract prompt fetching itself. Abstract the business capability the prompt powers. A `TextSummarizer` port hides the prompt entirely — the business layer calls `summarize(text)` and gets a result. The adapter (`OpenAITextSummarizer`) decides where its prompt template lives (Langfuse for hot-iterable copy, local YAML for source-controlled fallback) and what params and provider to use.
 
 ```python
+# app/summaries/ports/text_summarizer.py
 from typing import Protocol
 
 
-class PromptGateway(Protocol):
-    async def compile_chat(
+class TextSummarizer(Protocol):
+    async def summarize(self, text: str) -> str: ...
+```
+
+**Purpose**: one sentence — concrete `TextSummarizer` adapter that owns its own OpenAI client, reads its prompt template (Langfuse or local YAML), and returns a summarized string.
+
+**Responsibilities**:
+- Construct and hold the OpenAI client.
+- Resolve the prompt template at startup (Langfuse-first, YAML fallback).
+- Apply model/max_tokens/temperature config.
+- Cache the resolved prompt for `cache_ttl_seconds`.
+
+**Must not**:
+- Be injected with an LLM client externally — the adapter owns this.
+- Expose Langfuse-specific types across the `TextSummarizer` interface.
+
+```python
+# app/summaries/adapters/openai_text_summarizer.py
+class OpenAITextSummarizer:
+    def __init__(
         self,
-        name: str,
-        variables: dict[str, object],
-    ) -> list[dict[str, str]]: ...
+        *,
+        prompt_name: str,
+        prompt_label: str,
+        model: str,
+        max_tokens: int,
+        temperature: float,
+        cache_ttl_seconds: int,
+    ) -> None: ...
+
+    async def summarize(self, text: str) -> str: ...
 ```
 
-`**LangfusePromptGateway**` wraps the SDK's `[langfuse.get_prompt(name, type="chat", label=..., cache_ttl_seconds=...)](https://langfuse.com/docs/prompt-management/get-started)` on a worker thread and returns `prompt.compile(**variables)`. Fetch by `label` (typically `production` or `staging`) for environment rollout, or by pinned `version` for reproducibility — see [prompt version control](https://langfuse.com/docs/prompt-management/features/prompt-version-control). Tune `cache_ttl_seconds` per environment: `0` in local dev to always see the latest, a positive value in production — see [caching](https://langfuse.com/docs/prompt-management/features/caching).
+A `LocalYamlTextSummarizer` that reads its prompt template from a YAML file in source control is structurally the same — just swap `langfuse.get_prompt` for a file read at construction time. Use it as a deployment fallback for critical capabilities, or as the test fake (no separate `FakeTextSummarizer` needed if YAML covers the test surface).
 
-`**LocalPromptGateway**` reads chat-prompt JSON files from a directory, runs `{{variable}}` substitution, and raises when any referenced variable is missing. It serves two purposes: as a deployment fallback for critical prompts kept in source control, and as the test fake — API tests need no Langfuse credentials and no separate `FakePromptGateway`. A chat-prompt file mirrors the message-list shape that `prompt.compile` returns:
+The same port shape supports many variants: provider swap (`OpenAITextSummarizer` ↔ `ClaudeTextSummarizer`), model or prompt experimentation (`V1Summarizer` ↔ `V2Summarizer`), deterministic tests (`FakeTextSummarizer`), and failure/cost fallback (`PrimaryTextSummarizer` + `FallbackTextSummarizer` composed in a service). All of this happens behind the port — business code never picks the adapter.
 
-```json
-[
-  {"role": "system", "content": "Summarize for {{audience}}."},
-  {"role": "user", "content": "{{text}}"}
-]
-```
+The port carries domain arguments (`text`), not prompt variables (`{"text": ...}`). Business code never sees the prompt schema. If you find yourself passing a `variables: dict[str, object]` around, you've reinvented a generic prompt gateway.
 
-See also: [prompt management — get started](https://langfuse.com/docs/prompt-management/get-started), [version control](https://langfuse.com/docs/prompt-management/features/prompt-version-control), [caching](https://langfuse.com/docs/prompt-management/features/caching).
+See also: [./python-backend-architecture.md](./python-backend-architecture.md), [./litellm.md](./litellm.md), [prompt management — get started](https://langfuse.com/docs/prompt-management/get-started), [version control](https://langfuse.com/docs/prompt-management/features/prompt-version-control), [caching](https://langfuse.com/docs/prompt-management/features/caching), [observability — get started](https://langfuse.com/docs/observability/get-started).
 
 ## Tracing With LangChain
 
@@ -148,7 +166,7 @@ state = await agent.ainvoke(
 
 Create one handler per request/invocation rather than reusing a singleton — concurrent requests race on per-handler state (e.g., `last_trace_id`).
 
-See also: [LangChain integration](https://langfuse.com/docs/integrations/langchain/tracing), [observability — get started](https://langfuse.com/docs/observability/get-started).
+See also: [LangChain integration](https://langfuse.com/docs/integrations/langchain/tracing).
 
 ## Tracing With @observe
 
@@ -208,60 +226,44 @@ See also: [REST API reference](https://api.reference.langfuse.com), [OpenAPI spe
 
 ## FastAPI Example
 
-Wire the Langfuse client and the prompt gateway(s) through `dependency-injector` so neither is constructed in route handlers. Tracing is service-side and uses the client directly — no gateway.
+Wire capability-oriented ports through `dependency-injector` so route handlers depend on services, and services depend on Protocols — never on Langfuse, prompt names, or variables. Tracing is service-side and uses the Langfuse client directly — no gateway.
 
-```python
-# containers.py
-from dependency_injector import containers, providers
-from langfuse import get_client
+Container wiring for the `TextSummarizer` port lives in [./dependency-injector.md#langfuse](./dependency-injector.md#langfuse). Tests override at the port level: `container.text_summarizer.override(providers.Object(FakeTextSummarizer()))`.
 
-from .prompt_gateway import LangfusePromptGateway, LocalPromptGateway
-
-
-class Container(containers.DeclarativeContainer):
-    config = providers.Configuration(yaml_files=["configs/app.yaml"])
-
-    langfuse_client = providers.Singleton(get_client)
-    langfuse_prompt_gateway = providers.Singleton(
-        LangfusePromptGateway,
-        langfuse=langfuse_client,
-        label="production",
-        cache_ttl_seconds=300,
-    )
-    local_prompt_gateway = providers.Singleton(
-        LocalPromptGateway,
-        fallback_dir="prompts",
-    )
-```
-
-A service composes the two gateways for fallback; the route handler stays plain FastAPI. See `[./dependency-injector.md](./dependency-injector.md)` for the wiring pattern and `[./python-tests.md](./python-tests.md)` for replacing `langfuse_prompt_gateway` with `local_prompt_gateway` in API tests.
+Routes depend on services; services depend on the `TextSummarizer` Protocol. No Langfuse, no prompt name, no variables in business code. See [./python-tests.md](./python-tests.md) for port-level overrides in API tests.
 
 ## Production Checklist
 
 - Fetch prompts by deployment label, not by unqualified latest version.
 - Use a positive `cache_ttl_seconds` in production; `0` only in local development.
 - Prefetch critical prompts on startup when cold-start failure is unacceptable.
-- Keep `LocalPromptGateway` fallback files in source control for critical paths.
+- Keep a source-controlled YAML-backed adapter (e.g., `LocalYamlTextSummarizer`) wired up for capabilities whose downtime is unacceptable.
 - Validate prompt variables before calling the LLM.
 - Open a root span per request, seeded with `langfuse.create_trace_id(seed=request_id)`, so traces are reachable from a log line.
 - Attach user/session/tags at the root span via `propagate_attributes`; let nested spans inherit.
 - Pass one `CallbackHandler()` per LangChain/LangGraph invocation — never a shared singleton.
 - Call `get_client().shutdown()` on FastAPI shutdown and on script/worker process exit; use `flush()` only when a short-lived process must block for delivery.
-- Run API tests without Langfuse credentials — the client no-ops; swap `LangfusePromptGateway` for `LocalPromptGateway`.
+- Override capability ports in tests (`container.text_summarizer.override(...)`). Langfuse client no-ops without credentials, so leaving the Langfuse-backed adapter wired in API tests still works — but a `FakeTextSummarizer` is faster and deterministic.
 
 ## Pitfalls
 
 
 | Pitfall                                                      | Avoid it                                                                                                                        |
 | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------- |
-| Fetching prompts in route handlers                           | Inject a `PromptGateway`; prefetch where needed                                                                                 |
+| Generic `PromptGateway` returning `list[dict[str, str]]`     | Port the domain capability (`TextSummarizer.summarize(text)`), not prompt-fetch primitives. Business code shouldn't see the message-list shape. |
+| Injecting an LLM client into the adapter                     | Adapter constructs its own LLM client. If the LLM client itself needs to be swappable, that's a separate (lower-level) port — but in practice model/provider swap happens at the adapter level. |
 | Building a `TraceGateway` wrapper                            | Use the Langfuse client directly — tracing isn't substitutable and isn't a domain-stability concern, so a gateway adds no value |
-| Folding local fallback into `LangfusePromptGateway`          | Keep gateways single-purpose; compose fallback at the business layer                                                            |
 | Unqualified prompt fetches                                   | Fetch by `label` or pinned `version`                                                                                            |
 | Assuming prompt updates are instant                          | Account for SDK cache TTL and background revalidation                                                                           |
 | Missing prompt variables at compile time                     | Validate before the LLM call                                                                                                    |
 | Reusing one `CallbackHandler` across requests                | Create one per invocation — handler state (e.g., `last_trace_id`) is not concurrency-safe                                       |
 | Updating trace metadata in nested spans                      | Let only the request root own trace-level metadata                                                                              |
-| Real Langfuse credentials in CI                              | Use `LocalPromptGateway` for prompt fakes; let the Langfuse client no-op when keys are absent                                   |
+| Real Langfuse credentials in CI                              | Use `FakeTextSummarizer` (or a YAML-backed adapter) in API tests; the Langfuse client no-ops without credentials, but a fake is faster and deterministic. |
 | Calling `create_trace_id` as a static class method (v3 form) | v4 made it an instance method — call `langfuse.create_trace_id(seed=...)` on the client returned by `get_client()`              |
 | Forgetting `shutdown()` in workers/scripts                   | Call `get_client().shutdown()` at process end                                                                                   |
+
+## See Also
+
+- [./python-backend-architecture.md](./python-backend-architecture.md) — ports/adapters layer model and naming.
+- [./litellm.md](./litellm.md) — direct LLM client used inside summarizer-style adapters.
+- [./langchain.md](./langchain.md) — agent construction; Langfuse attaches via `CallbackHandler`.

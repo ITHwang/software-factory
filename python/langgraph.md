@@ -1,6 +1,6 @@
 # LangGraph
 
-> Last updated: 2026-05-11
+> Last updated: 2026-05-12
 
 ## TL;DR
 
@@ -99,41 +99,11 @@ class ResearchAgent(Protocol):
     async def run(self, input_state) -> object: ...
 ```
 
-The container builds the implementation once at startup and hands it to the route. The container shape follows [./dependency-injector.md](./dependency-injector.md).
+The container builds the implementation once at startup and hands it to the route.
 
-```python
-# containers.py
-from dependency_injector import containers, providers
-from langchain_litellm import ChatLiteLLM
+Container wiring (`Singleton` per compiled graph — building is expensive, so the graph is built once at startup) lives in [./dependency-injector.md#langgraph](./dependency-injector.md#langgraph).
 
-from .graphs import CompactionGraph, ResearchGraph
-
-
-class Container(containers.DeclarativeContainer):
-    config = providers.Configuration(yaml_files=["configs/app.yaml"])
-
-    chat_model = providers.Singleton(
-        ChatLiteLLM,
-        model=config.llm.model,
-        temperature=config.llm.temperature,
-    )
-
-    # One Singleton per concrete graph. Each graph compiles its StateGraph
-    # in __init__ and reuses it across requests; per-request context flows
-    # via Runtime[ContextT] and RunnableConfig — see Per-request context.
-    compaction_agent = providers.Singleton(
-        CompactionGraph,
-        chat_model=chat_model,
-        config=config.graphs.compaction,
-    )
-    research_agent = providers.Singleton(
-        ResearchGraph,
-        chat_model=chat_model,
-        config=config.graphs.research,
-    )
-```
-
-`providers.Singleton` is correct for compiled graphs: building the topology and binding nodes is expensive and must happen at startup. If a route accepts a request-driven choice between graphs, do that selection in the route handler with a small `match` block — there is no global registry.
+If a route accepts a request-driven choice between graphs, do that selection in the route handler with a small `match` block — there is no global registry.
 
 ## Building A Graph
 
@@ -239,67 +209,86 @@ Two architectures, both built on `create_agent`.
 
 ### One-agent architecture
 
+#### Purpose
+
+Single LLM + tool-set agent for tasks where one decision loop suffices.
+
+#### Responsibilities
+
+- Define a single `AgentState` TypedDict for the run.
+- Register the tool list at construction.
+- Compile once at startup via `create_agent`.
+- Emit observability events (token usage, custom stream events) for the run.
+
+#### Must not
+
+- Hand off to subordinate agents — use the supervisor pattern instead.
+- Own per-request state across invocations — request data lives on the input state.
+
 One `create_agent` with a few tools. All context lives on a single shared `AgentState`. The agent's model can emit multiple parallel tool calls in one `AIMessage`, and `create_agent` dispatches them in parallel via `Send("tools", [tool_call])` (see `langchain/agents/factory.py:1743`) — no work in user code.
 
 ```python
 from langchain.agents import create_agent
-from langchain_core.messages import HumanMessage
+from langchain.agents.middleware import AgentState
 from langchain_litellm import ChatLiteLLM
 
 
-class OneAgentResearch:
-    def __init__(self, *, chat_model: ChatLiteLLM, config: dict) -> None:
-        self.compiled = create_agent(
-            model=chat_model,
-            tools=[search_tool, fetch_tool],
-            system_prompt=config["system_prompt"],
-        )
+class OneAgentResearchState(AgentState):
+    query: str
 
-    async def run(self, *, query: str) -> str:
-        result = await self.compiled.ainvoke({"messages": [HumanMessage(query)]})
-        return result["messages"][-1].content
+
+class OneAgentResearch:
+    def __init__(self, *, chat_model: ChatLiteLLM, config: dict) -> None: ...
+    async def run(self, *, query: str) -> str: ...
 ```
+
+Tool registration order at construction: `[search_tool, fetch_tool]` — passed into `create_agent(model=..., tools=..., state_schema=OneAgentResearchState, system_prompt=...)`. `self.compiled` holds the resulting `CompiledStateGraph`.
 
 Use this when one agent can hold the entire context: the user's question, the tool calls, and the final answer fit on one message thread without overflowing the model's context window.
 
 ### Supervisor-subagent architecture
 
+#### Purpose
+
+Orchestrator agent that routes work to one or more subordinate agents.
+
+#### Responsibilities
+
+- Own routing decisions: which subordinate runs for which subtask.
+- Own the shared state shape that crosses subordinates (input handoff, aggregated output).
+- Coordinate subordinate composition (fixed-tool vs. delegated-tool subordinates).
+- Emit per-subordinate trace info (which subordinate ran, with what arguments, with what outcome).
+
+#### Must not
+
+- Do the subordinates' work itself — if the supervisor needs full subordinate context, the boundary is wrong.
+- Require subordinates to share a single tool set — each subordinate picks its own tools (own or delegated).
+- Own per-request session for individual subordinate runtime — each subordinate run is isolated to its tool-call scope.
+
 A supervisor `create_agent` that binds *subagent-tools*. Each subagent-tool, when invoked, runs an isolated inner `create_agent` with its own `AgentState`. The supervisor's only job is to **route and delegate**: which subagent, what task, what partial context. Each subagent sees only what the supervisor passes via the tool's arguments — never the supervisor's full message history.
 
 ```python
 from langchain.agents import create_agent
-from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool
 from langchain_litellm import ChatLiteLLM
 
 
 @tool
-async def research_subagent(task: str, focus_keywords: list[str]) -> str:
-    """Spawn a research subagent with isolated context.
+async def research_subagent(task: str, focus_keywords: list[str]) -> str: ...
 
-    Args:
-        task: The delegated subtask to research.
-        focus_keywords: Hints to narrow the subagent's search.
-    """
-    inner = create_agent(
-        model=ChatLiteLLM(model="gpt-5.2"),
-        tools=[search_tool, fetch_tool],
-        system_prompt=f"Research focus: {focus_keywords}. Task: {task}",
-    )
-    output = await inner.ainvoke({"messages": [HumanMessage(task)]})
-    return output["messages"][-1].content
+
+@tool
+async def summarize_subagent(task: str, sources: list[str]) -> str: ...
 
 
 supervisor = create_agent(
     model=ChatLiteLLM(model="gpt-5.2"),
     tools=[research_subagent, summarize_subagent],
-    system_prompt=(
-        "Decompose the user's question into subtasks. "
-        "Spawn research_subagent or summarize_subagent in parallel "
-        "for each subtask. Combine the results into a final answer."
-    ),
+    system_prompt="...decompose; spawn subagents in parallel; combine results...",
 )
 ```
+
+Tool registration order on the supervisor: `[research_subagent, summarize_subagent]` — each subagent body builds its own inner `create_agent` with its own tool list and `AgentState`, invoked via `await inner.ainvoke(...)`.
 
 Design rules:
 
@@ -520,16 +509,7 @@ graphs:
     max_iterations: 12
 ```
 
-```python
-# containers.py
-compaction_agent = providers.Singleton(
-    CompactionGraph,
-    chat_model=chat_model,
-    config=config.graphs.compaction,
-)
-```
-
-See [./dependency-injector.md](./dependency-injector.md) for the full `Configuration` provider walkthrough.
+The container passes each graph its config slice (e.g. `config=config.graphs.compaction`) at construction. See [./dependency-injector.md#langgraph](./dependency-injector.md#langgraph) for the full wiring and the [`Configuration` provider walkthrough](./dependency-injector.md).
 
 See also: [dependency-injector `Configuration` provider](https://python-dependency-injector.ets-labs.org/providers/configuration.html).
 

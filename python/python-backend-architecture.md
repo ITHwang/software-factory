@@ -1,0 +1,208 @@
+# Python Backend Architecture (Ports & Adapters)
+
+> Last updated: 2026-05-12
+
+## TL;DR
+
+Lightweight ports-and-adapters. Three layers: **entities**, **services + ports**, **adapters + clients**, fronted by **apis**. Ports are named after the capability the application needs (`TextSummarizer`, not `LLMGateway`). Adapters are named `[Implementation][Capability]` (`OpenAITextSummarizer`). Routes are infrastructure; service code never imports from `fastapi`.
+
+**Use this when:**
+- starting a new domain package and laying out `apis/services/ports/entities/adapters`
+- deciding whether a new outbound dependency deserves a port or should call a client directly
+- naming a new port or adapter
+- reviewing a PR for layer/dependency violations
+
+**Don't use this for:**
+- the Protocol vs ABC vs mixin decision -> `./abstractions.md`
+- persistence-layer mechanics (SQLAlchemy, repositories, transactions) -> `./sqlalchemy.md`
+- LLM capability ports with Langfuse-backed prompt templates -> `./langfuse.md`
+- DI container wiring details -> `./dependency-injector.md`
+- tooling baseline (Python version, ruff, FastAPI, pytest) -> `./python-guidelines.md`
+
+## Table of Contents
+
+| Section |
+|---------|
+| [Quick Reference](#quick-reference) |
+| [Layer Layout](#layer-layout) |
+| [Layer Responsibilities](#layer-responsibilities) |
+| [Naming: Ports](#naming-ports) |
+| [Naming: Adapters](#naming-adapters) |
+| [When To Use Ports](#when-to-use-ports) |
+| [Services And FastAPI](#services-and-fastapi) |
+| [See Also](#see-also) |
+| [Anti-Patterns](#anti-patterns) |
+
+## Quick Reference
+
+| Layer | Role |
+|-------|------|
+| `apis/` | HTTP transport: routers, request/response schemas, dependency wiring. |
+| `services/` | Business orchestration, transaction boundaries, calls into ports. |
+| `ports/` | `Protocol`-based contracts owned by the business layer. |
+| `entities/` | Domain objects and DTOs, independent of HTTP, DB, or SDK shapes. |
+| `adapters/` | Infrastructure implementations of ports (`PostgresUserRepository`, `OpenAITextSummarizer`). |
+| `clients/` | Low-level infrastructure clients (DB session wrappers, SDK wrappers, HTTP clients). Shared, not domain-scoped. |
+
+## Layer Layout
+
+Domain-scoped folders. Each business domain (`users`, `summaries`, `payments`, ...) gets its own slice of the five inner layers. `clients/` is shared because session wrappers and SDK clients aren't owned by any one domain.
+
+```text
+app/
+├── users/
+│   ├── apis/         # routers, request/response schemas
+│   ├── services/     # orchestration, txn boundaries
+│   ├── ports/        # Protocol contracts (UserRepository, ...)
+│   ├── entities/     # User, UserDTO, value objects
+│   └── adapters/     # PostgresUserRepository, SESEmailSender
+├── summaries/
+│   ├── apis/
+│   ├── services/
+│   ├── ports/        # TextSummarizer, ...
+│   ├── entities/
+│   └── adapters/     # OpenAITextSummarizer, ClaudeTextSummarizer
+├── clients/          # RDBClient, LiteLLMClient, S3Client, ...
+└── containers.py     # DI wiring
+```
+
+## Layer Responsibilities
+
+### apis
+
+- HTTP transport only: routers, Pydantic request/response schemas, `Depends(...)` wiring.
+- Translate domain results into response schemas; translate domain errors into HTTP responses via global exception handlers.
+- May pass request schemas directly into services when most fields are needed; do not unpack into kwargs just to "hide" the schema.
+- Own the `fastapi` import surface for the package. Anything that touches `Depends`, `Request`, `HTTPException`, or `status` lives here.
+
+### services
+
+- Business orchestration: call ports, sequence work, decide on commits and rollbacks.
+- Receive request DTOs/schemas as plain arguments; return domain objects (entities or DTOs), never response schemas.
+- Own transaction boundaries (commit points are a business decision, not an infrastructure one). See `./sqlalchemy.md` for the `RDBClient`-threaded pattern.
+- **Must not import from `fastapi`** (no `Depends`, `Request`, `HTTPException`, `status`). Raise domain errors (`CustomError` subclasses) instead.
+
+### ports
+
+- `Protocol`-based contracts the business layer needs from the outside world.
+- Owned by the business layer: signatures express domain intent (`summarize(text: str) -> str`), not vendor primitives.
+- Take and return domain types only. No SDK objects, no HTTP response classes, no SQLAlchemy rows leak into a port signature.
+- Tend to be small (3-8 methods). If a port grows large, the capability is probably two capabilities.
+
+### entities
+
+- Domain objects: dataclasses, Pydantic models used as DTOs, value objects, domain enums.
+- Independent of transport, persistence, and SDKs. An entity does not know whether it came from Postgres or an HTTP body.
+- Shared across `services`, `ports`, and `adapters` within the same domain.
+
+### adapters
+
+**Purpose**: Translate between domain types defined by ports and vendor-specific SDK types.
+
+**Responsibilities**:
+- Own SDK / infrastructure construction and lifecycle (or receive a low-level client from `clients/`).
+- Map domain types (on the port surface) to and from vendor types (internally).
+- Catch vendor-specific errors and re-raise them as domain errors (`CustomError` subclasses).
+- Hold infrastructure state (configured model name, prompt label, regional endpoint). Stateful adapters are fine; they're infrastructure, not entities.
+
+**Constraints**:
+- Must not leak vendor types (SDK request/response classes, ORM rows, HTTP response objects) across the port surface into services or ports.
+- Must not contain business logic — orchestration, sequencing, transaction decisions belong in services.
+- Must not be called directly by routes. Routes obtain a service from DI; the service holds the port.
+
+- Concrete implementations of ports. One adapter per `(implementation, capability)` pair.
+- Translate between domain types (on the port surface) and vendor types (internally).
+- Construct the infrastructure they need (LLM SDK clients, HTTP clients) or receive a low-level client from `clients/`.
+- Hold infrastructure state (configured model name, prompt label, regional endpoint). Stateful adapters are fine; they're infrastructure, not entities.
+
+### clients
+
+**Purpose**: Provide shared, domain-agnostic wrappers around infrastructure SDKs and connections that adapters and (where no port is warranted) services consume.
+
+**Responsibilities**:
+- Wrap a single piece of infrastructure (DB session executor, SDK, HTTP transport) with a minimal, capability-neutral surface.
+- Own infrastructure-level concerns: connection construction, session lifecycle, retry/timeout primitives.
+- Translate transport-level errors into a stable shape adapters can map onto domain errors.
+
+**Constraints**:
+- Must not encode business contracts — a client is `LiteLLMClient`, not `TextSummarizer`. Domain intent belongs in ports.
+- Must not live inside a domain folder. Clients are shared infrastructure under `app/clients/`.
+- Must not import from any domain package (`users/`, `summaries/`, ...). The dependency direction is domain -> client, never the reverse.
+
+- Lightweight wrappers around infrastructure: DB session executors (`RDBClient`), SDK wrappers (`LiteLLMClient`), HTTP clients.
+- Not tied to a business contract. Services may use a client directly when no port abstraction is warranted (see [When To Use Ports](#when-to-use-ports)).
+- Shared across domains. Live under `app/clients/`, not inside a domain folder.
+
+## Naming: Ports
+
+Capability-oriented. The name describes what the application asks for, not what infrastructure provides.
+
+| Port | Capability |
+|------|-----------|
+| `UserRepository` | Persistence and CRUD for users. |
+| `EmailSender` | Send an email. (Not `EmailGateway`.) |
+| `TextSummarizer` | Summarize text. (Not `LLMGateway`.) |
+| `EmbeddingGenerator` | Produce embeddings for text. |
+| `PaymentProcessor` | Charge a payment method. |
+
+Rules:
+
+- **`Repository` is reserved for persistence/CRUD.** Don't use it for non-persistence concerns ("a `PromptRepository` that fetches templates" is the warning sign).
+- **All other outbound ports use the capability name.** Verb-shaped (`EmailSender`, `TextSummarizer`) or role-shaped (`PaymentProcessor`).
+- **Generic `Gateway` is deprecated for new code.** It encodes "the thing on the other side of the wall" instead of the capability the business needs. Existing docs (`langchain.md`, `pdf-textract-extraction.md`, `pdf-unstructured-io-extraction.md`, `document-ingestion.md`, `python-tests.md`, `dependency-injector.md`) still use `*Gateway` naming; that's legacy alignment debt scheduled for a future pass. Don't introduce new ones.
+
+## Naming: Adapters
+
+Convention: **`[Implementation][Capability]`**. The implementation prefix is the vendor, technology, or variant; the capability is the port name.
+
+| Adapter | Port |
+|---------|------|
+| `PostgresUserRepository` | `UserRepository` |
+| `SESEmailSender`, `ResendEmailSender` | `EmailSender` |
+| `OpenAITextSummarizer`, `ClaudeTextSummarizer` | `TextSummarizer` |
+| `VoyageEmbeddingGenerator`, `OpenAIEmbeddingGenerator` | `EmbeddingGenerator` |
+| `StripePaymentProcessor` | `PaymentProcessor` |
+
+Variants beyond vendor swap:
+
+- **Test fakes:** `FakeTextSummarizer`, `FakeUserRepository`. Prefer `Fake*` over `Mock*` (mocks are a tool, fakes are a kind).
+- **Experimentation:** `V1Summarizer`, `V2Summarizer` when the business cares which generation answered.
+- **Composition variants:** `PrimaryTextSummarizer` and `FallbackTextSummarizer` composed by a service when one provider acts as the failover for another.
+
+## When To Use Ports
+
+Two criteria. **Both must hold** — if neither does, skip the port and have the service call a client (or a vendor SDK) directly.
+
+1. **The business layer should own the contract.** Business requirements evolve first; infrastructure follows. If the shape of the call would change because the business asked for a new capability (not because we swapped vendors), it belongs behind a port.
+2. **The external dependency should be replaceable.** PostgreSQL -> DocumentDB, SES -> SendGrid, OpenAI -> Claude. If the dependency is effectively fixed for the life of the project (the standard library, a config file format, a logger), a port is overhead.
+
+Lightweight infra clients (DB session wrappers, SDK wrappers, HTTP clients) live in `app/clients/`. Unlike adapters, clients aren't tied to business contracts and may be used directly by services when no port abstraction is warranted. The split: ports express what the business needs; clients express what infrastructure offers.
+
+## Services And FastAPI
+
+Services are framework-agnostic. The boundary is sharp.
+
+- Services receive request data as plain DTOs / Pydantic schemas / primitive args, not as `Request` objects.
+- Services do not depend on `fastapi.Depends`, `fastapi.HTTPException`, or `fastapi.status` — they raise domain errors (`CustomError` subclasses, see `./python-guidelines.md` Exception Handling) and let global exception handlers translate to HTTP.
+- Routes translate domain results into response schemas and domain errors into HTTP responses. The route is the only layer that legally imports from `fastapi`.
+- A grep for `from fastapi` in `services/` should return nothing. Treat hits as review blockers.
+
+The DI container exposes services; routes obtain them via `Depends(Provide[Container.user_service])`. Request-scoped infrastructure (e.g. an `RDBClient` with a per-request transaction lifecycle) is obtained via the same mechanism and threaded into service methods as an argument — see `./sqlalchemy.md` for the worked pattern.
+
+## See Also
+
+- [./abstractions.md](./abstractions.md) — Protocol vs ABC vs mixin decision.
+- [./aws-s3.md](./aws-s3.md) — worked Repository + adapter example.
+- [./dependency-injector.md](./dependency-injector.md) — DI wiring patterns.
+- [./sqlalchemy.md](./sqlalchemy.md) — persistence layer in this style (`RDBClient`, `UserRepository`).
+- [./langfuse.md](./langfuse.md) — LLM capability ports with Langfuse-backed prompt templates.
+- [./python-guidelines.md](./python-guidelines.md) — Python tooling baseline and exception-handling convention.
+
+## Anti-Patterns
+
+1. **Generic `*Gateway` names for new code.** Pick the capability name (`EmailSender`, `TextSummarizer`). Reserve domain framing for the port; reserve vendor framing for the adapter.
+2. **`Repository` for non-persistence concerns.** A "`PromptRepository`" that loads templates is a capability port wearing a persistence costume — name it for the capability (`TextSummarizer`) and let the adapter own the template-loading detail.
+3. **Service imports from `fastapi`.** Anything from `fastapi` — `Depends`, `Request`, `HTTPException`, `status` — belongs in routes. Services raise domain errors.
+4. **A port for everything.** If neither business-ownership nor replaceability applies, the port is dead weight. Call a client (or the SDK) directly from the service.
+5. **Adapters bleeding vendor types into ports.** Port signatures take and return domain types; the adapter does the translation. If the port has `OpenAIResponse` in a return type, the port is wrong.
+6. **Constructing vendor SDKs in services.** Services receive ports and clients via DI; they don't `import openai` or `import boto3`. That import surface lives in adapters and clients.

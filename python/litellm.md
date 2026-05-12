@@ -1,6 +1,6 @@
 # Provider-Neutral LLM Calls (LiteLLM)
 
-> Last updated: 2026-05-11
+> Last updated: 2026-05-12
 
 ## TL;DR
 
@@ -132,42 +132,18 @@ class LiteLLMSettings(BaseModel):
     provider_kwargs: dict[str, Any] = Field(default_factory=dict)
 ```
 
-```python
-# containers.py
-from dependency_injector import containers, providers
-
-from .litellm_client import LiteLLMClient, LiteLLMSettings
-from .services import SummaryService
-
-
-class Container(containers.DeclarativeContainer):
-    config = providers.Configuration(yaml_files=["configs/app.yaml"])
-
-    litellm_settings = providers.Factory(
-        LiteLLMSettings,
-        model=config.llm.model,
-        temperature=config.llm.temperature.as_float(),
-        max_tokens=config.llm.max_tokens.as_int(),
-        timeout_seconds=config.llm.timeout_seconds.as_float(),
-        api_base=config.llm.api_base,
-        custom_llm_provider=config.llm.custom_llm_provider,
-        provider_kwargs=config.llm.provider_kwargs,
-    )
-    litellm_client = providers.Singleton(
-        LiteLLMClient,
-        settings=litellm_settings,
-    )
-
-    summary_service = providers.Factory(
-        SummaryService,
-        litellm_client=litellm_client,
-    )
-```
+Container wiring (settings `Factory` + client `Singleton` + per-request service `Factory`) lives in [./dependency-injector.md#litellm](./dependency-injector.md#litellm).
 
 ## Core Pattern
 
 Keep the LiteLLM call, provider option merging, error mapping, and response
 extraction in one client.
+
+**Purpose:** unified async client over the LiteLLM SDK that hides provider differences from services and emits typed completions.
+
+**Responsibilities:** own provider configuration (model, `api_base`, headers); call LiteLLM's completion API; map LiteLLM errors into a small set of typed exceptions; expose async text completions and structured (Pydantic-validated) completions.
+
+**Must not:** own retry policy (decorated externally via `@retry`); own token accounting (callers extract from response); own per-call provider switching (one client per configured provider).
 
 ```python
 # litellm_client.py
@@ -189,43 +165,25 @@ class LiteLLMClientError(Exception):
 
 
 class LiteLLMClient:
-    def __init__(self, settings: LiteLLMSettings) -> None:
-        self._settings = settings
+    def __init__(self, settings: LiteLLMSettings) -> None: ...
 
-    async def complete_text(self, messages: Sequence[Message]) -> str:
-        response = await self.acomplete(messages=messages)
-        return response.choices[0].message.content or ""
+    async def complete_text(self, messages: Sequence[Message]) -> str: ...
 
     async def complete_structured(
         self,
         messages: Sequence[Message],
         response_model: type[StructuredT],
-    ) -> StructuredT:
-        response = await self.acomplete(
-            messages=messages,
-            response_format=response_model,
-        )
-        content = response.choices[0].message.content or "{}"
-        return response_model.model_validate_json(content)
+    ) -> StructuredT: ...
 
-    async def acomplete(self, messages: Sequence[Message], **kwargs):
-        request: dict[str, Any] = {
-            "model": self._settings.model,
-            "messages": list(messages),
-            "temperature": self._settings.temperature,
-            "max_tokens": self._settings.max_tokens,
-            "timeout": self._settings.timeout_seconds,
-            "api_base": self._settings.api_base,
-            "custom_llm_provider": self._settings.custom_llm_provider,
-            **self._settings.provider_kwargs,
-            **kwargs,
-        }
-        request = {key: value for key, value in request.items() if value is not None}
-        try:
-            return await litellm.acompletion(**request)
-        except Exception as exc:
-            raise classify_litellm_error(exc) from exc
+    async def acomplete(self, messages: Sequence[Message], **kwargs: Any) -> Any: ...
 ```
+
+`acomplete` merges configured defaults with per-call `kwargs`, drops `None`
+entries, and delegates to `litellm.acompletion`; exceptions pass through
+`classify_litellm_error` (see [Retries And Errors](#retries-and-errors)).
+`complete_text` returns `response.choices[0].message.content`;
+`complete_structured` passes `response_format=response_model` and validates the
+returned JSON with `response_model.model_validate_json`.
 
 Never call `litellm.completion()` from an async FastAPI request handler. It is a
 blocking call and will stall the event loop. Reserve sync completion for CLI
@@ -492,14 +450,12 @@ class SummaryService:
         return SummaryResponseDTO(summary=summary)
 ```
 
+DI wiring for these routes (`@inject` + `Depends(Provide[Container.summary_service])`) lives in [./dependency-injector.md#litellm](./dependency-injector.md#litellm). Route bodies focus on tool capability below.
+
 ```python
 # routes.py
-from typing import Annotated
+from fastapi import APIRouter
 
-from dependency_injector.wiring import Provide, inject
-from fastapi import APIRouter, Depends
-
-from .containers import Container
 from .schemas import SummaryRequestDTO, SummaryResponseDTO
 from .services import SummaryService
 
@@ -507,10 +463,9 @@ router = APIRouter()
 
 
 @router.post("/summaries", response_model=SummaryResponseDTO)
-@inject
 async def create_summary(
     payload: SummaryRequestDTO,
-    service: Annotated[SummaryService, Depends(Provide[Container.summary_service])],
+    service: SummaryService,  # injected via container
 ) -> SummaryResponseDTO:
     return await service.summarize(payload.text)
 ```
@@ -518,21 +473,15 @@ async def create_summary(
 Streaming route:
 
 ```python
-from dependency_injector.wiring import Provide, inject
 from fastapi.responses import StreamingResponse
 
-from .containers import Container
 from .litellm_client import LiteLLMClient
 
 
 @router.post("/summaries/stream")
-@inject
 async def stream_summary(
     payload: SummaryRequestDTO,
-    litellm_client: Annotated[
-        LiteLLMClient,
-        Depends(Provide[Container.litellm_client]),
-    ],
+    litellm_client: LiteLLMClient,  # injected via container
 ) -> StreamingResponse:
     messages = [
         {"role": "system", "content": "Summarize in three concise bullets."},
