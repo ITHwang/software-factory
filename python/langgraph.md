@@ -523,7 +523,7 @@ Tight checklist when introducing a new graph. Each line is the minimum bar — f
 - **Configure** via the DI container (`providers.Configuration(yaml_files=[...])`) — no per-class YAML mandate. See [./dependency-injector.md](./dependency-injector.md).
 - **Wire** as a Protocol-typed port in the business layer (`ResearchAgent`, `CompactionAgent`, …); the graph satisfies it structurally — no inheritance.
 - **Expose** via `providers.Singleton` in the container so the graph compiles once at startup.
-- **Service-exposed graphs** need a route + auth + rate-limit policy. See [./slowapi.md](./slowapi.md).
+- **Service-exposed graphs** need a route + auth + rate-limit policy. See [./rate-limit.md](./rate-limit.md).
 - **Tests** in two paths: API tests mock the gateway Protocol; graph functional tests use `LLMToolEmulator` with a real LLM. See [Testing](#testing).
 
 ## Mixins
