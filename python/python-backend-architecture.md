@@ -1,6 +1,6 @@
 # Python Backend Architecture (Ports & Adapters)
 
-> Last updated: 2026-05-12
+> Last updated: 2026-05-14
 
 ## TL;DR
 
@@ -149,7 +149,10 @@ Rules:
 
 - **`Repository` is reserved for persistence/CRUD.** Don't use it for non-persistence concerns ("a `PromptRepository` that fetches templates" is the warning sign).
 - **All other outbound ports use the capability name.** Verb-shaped (`EmailSender`, `TextSummarizer`) or role-shaped (`PaymentProcessor`).
-- **Generic `Gateway` is deprecated for new code.** It encodes "the thing on the other side of the wall" instead of the capability the business needs. Existing docs (`langchain.md`, `pdf-textract-extraction.md`, `pdf-unstructured-io-extraction.md`, `document-ingestion.md`, `python-tests.md`, `dependency-injector.md`) still use `*Gateway` naming; that's legacy alignment debt scheduled for a future pass. Don't introduce new ones.
+- **Generic `Gateway` is deprecated.** It encodes "the thing on the other side of the wall" instead of the capability the business needs. Use the capability name (verb-shaped like `EmailSender`, or role-shaped like `PaymentProcessor`). When a clean capability noun is hard to find, the `*Port` postfix on the port (and `*Adapter` postfix on the adapter) is acceptable — both pure (`EmailSender`) and postfixed (`EmailSenderPort`) are valid; pick whichever reads naturally for the capability.
+- **Port shape is use-case-driven.** Small ports (1–5 methods) are normal in ports-and-adapters; each port reflects a use case. When read consumers and write consumers diverge strongly, split the port into a pair — `*Retriever` + `*Indexer`, `*Reader` + `*Writer`, or any natural read/write division. Default to unified when callers always touch both sides.
+- **`Repository` is the conservative default for persistence; it CAN be split** when read and write use cases diverge (e.g., a search-only service and an ingest-only worker should not share a CRUD port). The underlying principle is the same: ports are use-case-shaped, and small ports are not a violation.
+- **Don't prefix our ports/adapters with `Async*` / `Sync*`.** Async-vs-sync lives at the method signature (`async def search(...)`). SDK-imposed names (e.g., pymilvus's `AsyncMilvusClient`) are used as imported — we don't rename what we don't own — but our own ports and adapters stay capability-named.
 
 ## Naming: Adapters
 
@@ -163,9 +166,11 @@ Convention: **`[Implementation][Capability]`**. The implementation prefix is the
 | `VoyageEmbeddingGenerator`, `OpenAIEmbeddingGenerator` | `EmbeddingGenerator` |
 | `StripePaymentProcessor` | `PaymentProcessor` |
 
+- **`*Adapter` suffix is opt-in signaling.** The default adapter shape is `[Implementation][Capability]` without a suffix (`OpenAITextSummarizer`, not `OpenAITextSummarizerAdapter`). Use the `*Adapter` suffix only when the class is explicitly the **GoF Adapter Pattern** — wrapping a third-party SDK / library / external resource to match a port shape — and you want the name to signal that intent. Pure capability implementations (in-memory, mocks, project-internal) don't need the suffix; the architecture's port-adapter role is implicit.
+
 Variants beyond vendor swap:
 
-- **Test fakes:** `FakeTextSummarizer`, `FakeUserRepository`. Prefer `Fake*` over `Mock*` (mocks are a tool, fakes are a kind).
+- **Test doubles:** `MockTextSummarizer`, `MockUserRepository`. Prefer `Mock*` over `Fake*` — it matches the stdlib `unittest.mock` vocabulary the project's tests already use, and reads naturally as the test-context indicator.
 - **Experimentation:** `V1Summarizer`, `V2Summarizer` when the business cares which generation answered.
 - **Composition variants:** `PrimaryTextSummarizer` and `FallbackTextSummarizer` composed by a service when one provider acts as the failover for another.
 
@@ -187,7 +192,19 @@ Services are framework-agnostic. The boundary is sharp.
 - Routes translate domain results into response schemas and domain errors into HTTP responses. The route is the only layer that legally imports from `fastapi`.
 - A grep for `from fastapi` in `services/` should return nothing. Treat hits as review blockers.
 
-The DI container exposes services; routes obtain them via `Depends(Provide[Container.user_service])`. Request-scoped infrastructure (e.g. an `RDBClient` with a per-request transaction lifecycle) is obtained via the same mechanism and threaded into service methods as an argument — see `./sqlalchemy.md` for the worked pattern.
+**Route handler dependency rules.** Routes hold one thing by default: the DI container. Services are obtained via `Depends(Provide[Container.user_service])` (or equivalent). Adapters, clients, SDK objects, and entity types do not appear in route signatures — services own those.
+
+**Lifecycle scope rules.** App-scoped objects (`Singleton` / `Resource`) are shared for one worker-process app lifespan and must not retain request-scoped mutable state. Request scope has two implementation shapes:
+
+- **Strict request scope:** FastAPI `Depends` / `yield` dependencies own request-derived state and cleanup-bound state.
+- **Request-owned Factory:** `providers.Factory` may build a service/repository for the request path, but `Factory` means new-per-call, not one-per-request. The request path must resolve it once and pass it downward when one instance is required.
+
+**Strict request-scope exceptions.** Two cases use FastAPI's `Depends(...)` instead of plain `Provide`, because their lifecycle is tied to the request itself, not to the app-scoped container:
+
+- **`RDBClient`** (per-request transactional session). Routes receive it via `Depends(get_rdb_client)` and thread it into service method calls. See [`./sqlalchemy.md`](./sqlalchemy.md) for the worked pattern.
+- **Auth context** (`CurrentUser`, derived from the request's bearer token). Routes receive it via `Depends(get_current_user)`. See [`./cognito-auth.md`](./cognito-auth.md) for the worked pattern.
+
+Both exceptions exist because the underlying state is **strict request-scoped**. Everything else (app-scoped singletons/resources, request-owned factory services, services holding ports) flows through `dependency-injector`'s `@inject` + `Provide`.
 
 ## See Also
 

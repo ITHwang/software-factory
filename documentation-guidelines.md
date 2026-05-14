@@ -1,10 +1,10 @@
 # Documentation Guidelines
 
-> Last updated: 2026-05-12
+> Last updated: 2026-05-14
 
 ## TL;DR
 
-How every reference doc in this repo is structured so a coding agent can:
+**Why** every reference doc is structured this way: to pre-decide architecture / tooling / when-to-use questions so an agent applies them without escalating to the human (see [Purpose](#purpose)). **How** the structure helps the agent:
 
 - decide whether a doc is relevant from the first ~512 tokens (TL;DR + navigation table fit in that window),
 - jump straight to the section it needs from a table at the top,
@@ -15,13 +15,23 @@ How every reference doc in this repo is structured so a coding agent can:
 
 **Don't use this for:** project-memory files (`CLAUDE.md`), PR descriptions, or one-off RFCs — those have their own shape.
 
+## Purpose
+
+This corpus exists to **pre-decide** the architecture, tooling, and when-to-use questions that a coding agent would otherwise interrupt to ask. The agent's job is to *apply* these decisions, not to re-derive them on every task.
+
+- **Binding intent over derivable implementation.** When a doc says "use X for Y" or "name ports for the capability," that *is* the answer — not one option among alternatives the agent should weigh against training-data defaults. The decisions in these docs are load-bearing; the agent follows them.
+- **Decisions live here; implementations live in code.** A doc names the architectural rule, the tool choice, the layer boundary, the trigger condition. The exact body the agent writes is derivable from those rules plus the surrounding codebase.
+- **Silence is the only escalation signal.** If a doc covers the question, follow it. If no doc covers it, *then* ask the human. The `Use when` and `Don't use for` lines in every TL;DR exist so the agent knows which doc owns which decision — and which sibling doc to read instead when this one doesn't.
+
+Every other rule in this file — structure, TL;DR shape, TOC placement, section discipline — exists to serve that purpose. Structure makes a decision findable in the first ~512 tokens; section discipline keeps the decision from being buried under derivable detail.
+
 ## Required structure
 
 Every doc has this skeleton, in this order:
 
 1. **H1 title** — the doc's topic. One per file.
 2. **`> Last updated: YYYY-MM-DD`** — single-line blockquote, immediately under the H1. Bump on any non-trivial content change.
-3. **`## TL;DR` section** — purpose + triggers. See [TL;DR section](#tldr-section).
+3. **`## TL;DR` section** — one-line purpose, decision triggers (`Use this when`), and redirects to the sibling docs that own adjacent decisions (`Don't use this for`). See [TL;DR section](#tldr-section).
 4. **`## Table of Contents` section** — phase-grouped table inside it (recommended) or flat TOC of section anchors. See [Table of Contents](#table-of-contents).
 5. **Body sections** — H2 sections in reading order. External links live inline at the section's end as `See also:` lines.
 6. **No trailing `## References`** section. References belong at the section that uses them, not in a footer.
@@ -43,7 +53,10 @@ One-to-two sentences naming what the doc covers.
 - anti-pattern → sibling doc that handles it (`./other-doc.md`)
 ```
 
-Keep it concrete. "When you need X" beats "general guide to X". The "Don't use this for" bullets point at the sibling doc that *does* own that scope — they redirect the agent away.
+Keep it concrete. "When you need X" beats "general guide to X". The two bullet groups are decision triage, not navigation hints:
+
+- **Use this when** lines are *decision triggers* — the concrete situations on which this doc's pre-committed decisions activate. List tasks an agent will recognize ("starting a new domain package," "picking a production stack"), not abstract topics ("about architecture").
+- **Don't use this for** lines are *redirects* — they name the sibling doc that owns the adjacent decision, so the agent stops reading here and goes there. Always link the sibling.
 
 **Size cap: 512 tokens (~400 words, ~50 lines).** This is the ceiling — most TL;DRs land in the 100–200-token range. The cap exists because the TL;DR + the navigation table that follows must both fit in a coding-agent's first peek window (also ~512 tokens). If the TL;DR is hitting the cap, the doc probably covers too much — split it.
 
@@ -130,7 +143,7 @@ See also: [redis-py async docs](https://redis.readthedocs.io/...).
 
 ### Core principle
 
-Humans define intent; agents synthesize implementation. The job of a reference doc is to name what the agent must not violate, not to spell out every line the agent can derive.
+Humans define intent; agents synthesize implementation. The job of a reference doc is to **pre-decide** what the agent must not violate (see [Purpose](#purpose)), not to spell out every line the agent can derive. A doc's value is the decisions it carries — architectural rules, tool choices, naming conventions, layer boundaries. Derivable filler dilutes the binding signal: the agent has to weigh which lines are normative and which are illustrative, and that ambiguity is exactly what re-introduces the escalation the corpus is meant to eliminate.
 
 The decision is **section-level, not file-level**. A single `cache.md` doc legitimately contains an install section (verbatim commands), TTL/key recipe sections (recipe code), and a `RedisClient` lifecycle section (architectural scaffold). Each section picks its content style from what *that section* defines, not from what file it lives in.
 
@@ -214,7 +227,7 @@ One sentence: why this object exists.
 - Transaction / error / concurrency ownership.
 
 ### Lifecycle
-- Scope: singleton / request-scoped / transient.
+- Scope: App Scope / Request Scope / Owned-Transient Scope.
 - Who creates it.
 - Who shares it.
 - Who cleans it up.
@@ -228,24 +241,36 @@ ASCII graph showing dependency direction, ownership, and lifecycle scope.
 - Must not own Z.
 ```
 
+### Lifecycle scope tags
+
+Use these three scope names in lifecycle sections and relationship graphs:
+
+| Scope | Meaning | Typical owner |
+|---|---|---|
+| **App Scope** | One object per Python worker/process app lifespan. It starts when that worker app starts and ends when that worker app shuts down; it is not deployment-wide. | `dependency-injector` `Singleton` or `Resource`, usually initialized/closed by FastAPI lifespan. |
+| **Request Scope** | One object or context for one HTTP request, cleaned up after the response path finishes. | FastAPI `Depends` / `yield` dependencies for strict lifecycle ownership; a request-owned call chain for lightweight factory-built objects. |
+| **Owned-Transient Scope** | Object created by an owner object or operation and used only while that owner/call needs it. | Normal Python ownership, function scope, composition, or context managers. |
+
+Provider names are not scopes by themselves. `providers.Factory` means "new object per provider call"; it becomes request-owned only when a request-scoped caller creates/receives it once and passes it down. Cleanup-sensitive owned/transient objects must use explicit cleanup (`with`, `async with`, `try/finally`, or `close()`), not implicit finalization.
+
 Lifecycle-aware relationship graph (worked example for an async SQLAlchemy stack):
 
 ```text
 [App Scope]
-    ├── [AsyncEngine]        (singleton)
-    └── [sessionmaker]       (singleton)
+    ├── [AsyncEngine]        (app-scoped Resource)
+    └── [sessionmaker]       (app-scoped Singleton)
 
 [Request Scope]
-    └── [AsyncSession]       (request-scoped)
+    └── [AsyncSession]       (request-scoped Depends/yield)
             │ shared by
             ▼
-       [RDBClient]
+       [RDBClient]           (request-scoped Depends/yield)
             │ injected into
             ▼
-       [Repositories]
+       [Repositories]        (request-owned Factory)
             │ used by
             ▼
-       [Services]
+       [Services]            (request-owned Factory)
 ```
 
 Lifecycle belongs to the relationship graph as much as to the object. "AsyncSession is request-scoped" really means *"one AsyncSession is created per request, shared by request-local repositories/services, cleaned up at the end of that request."* The scope tag on a node is shorthand; the graph carries the actual contract.
@@ -261,5 +286,7 @@ Examples of the right shape:
 - Repositories never own transaction boundaries.
 - Request-scoped mutable objects must not leak into singletons.
 - Singleton objects must be stateless or concurrency-safe.
+- Factory-built objects must not be described as request-scoped unless a request-scoped owner controls one instance for the request.
+- Owned/transient objects with external resources must have explicit cleanup; implicit finalization is not an architectural lifecycle owner.
 
 Rules generalize; code templates rot. A constraint like *"repositories never own transaction boundaries"* lets the agent apply the pattern to new repositories the doc never anticipated. A code template showing one transaction-aware repository teaches the agent to copy that exact shape and breaks the moment the next repository has a different signature.

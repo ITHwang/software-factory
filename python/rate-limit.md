@@ -1,6 +1,6 @@
 # Rate Limiting
 
-> Last updated: 2026-05-13
+> Last updated: 2026-05-14
 
 ## TL;DR
 
@@ -80,14 +80,15 @@ Per-FastAPI-app rate-limit enforcer that intercepts inbound requests and short-c
 - Must not store request bodies — only counters keyed by `key_func` output.
 
 #### Lifecycle
-- Scope: app-scoped Singleton — one `Limiter` per FastAPI app.
+- Scope: App Scope (`Singleton`) — one `Limiter` per FastAPI app / worker process.
 - Created by: the DI container or the app factory at startup.
 - Shared by: every route on that FastAPI app, via `app.state.limiter`.
 - Cleaned up by: process shutdown (storage backends — especially Redis — close on their own lifecycle, not the limiter's).
 
 #### Relationships
 ```text
-Container ──(Singleton)──▶ Limiter
+[App Scope]
+Container ──(app-scoped Singleton)──▶ Limiter
                               │
                               ▼
                        FastAPI.state.limiter

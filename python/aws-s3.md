@@ -1,6 +1,6 @@
 # AWS S3
 
-> Last updated: 2026-05-12
+> Last updated: 2026-05-14
 
 ## TL;DR
 
@@ -72,11 +72,11 @@ An async S3 wrapper around `aioboto3` that owns the session-and-client lifecycle
 - Map `botocore.ClientError` codes to wrapper-level booleans (`object_exists`) or domain errors; never silently swallow non-404 failures.
 - **Must not** own credential discovery — delegate to the boto credential chain and environment.
 - **Must not** own bucket-naming conventions — callers decide names; the wrapper only validates and resolves.
-- **Must not** be per-request — one `aioboto3.Session` per process; the per-request unit is the client context manager around it.
+- **Must not** be per-request — one `aioboto3.Session` and one opened S3 client `Resource` per worker process.
 
 ### Lifecycle
 
-- Scope: app-scoped `Singleton` for the wrapper class itself; the `aioboto3.Session` it depends on is also app-scoped `Singleton`; the low-level client is opened by the container as a `Resource` (async context manager) per process.
+- Scope: App Scope. The wrapper is an app-scoped `Singleton`; the `aioboto3.Session` it depends on is an app-scoped `Singleton`; the low-level client is opened by the container as an app-scoped `Resource`.
 - Created by: the DI container at startup, after the `aioboto3.Session` `Singleton` resolves and the client `Resource` opens.
 - Shared by: repository adapters (`S3UserRepository`, `S3DocumentRepository`, …) injected into business-layer services.
 - Cleaned up by: the container — it closes the client `Resource` at shutdown. The `aioboto3.Session` has no explicit teardown; it dies with the process.
@@ -85,14 +85,14 @@ An async S3 wrapper around `aioboto3` that owns the session-and-client lifecycle
 
 ```text
 [App Scope]
-    ├── [aioboto3.Session]      (singleton)
-    └── [aioboto3 S3 client]    (singleton Resource, async context manager)
+    ├── [aioboto3.Session]      (app-scoped Singleton)
+    └── [aioboto3 S3 client]    (app-scoped Resource, async context manager)
             │ injected into
             ▼
-       [S3Client]               (singleton wrapper)
+       [S3Client]               (app-scoped Singleton wrapper)
             │ injected into
             ▼
-       [S3*Repository adapters] (singleton, implement business-layer ports)
+       [S3*Repository adapters] (app-scoped Singleton, implement business-layer ports)
             │ injected into
             ▼
        [Services]
@@ -183,7 +183,7 @@ See also: `[./dependency-injector.md](./dependency-injector.md)`, [Dependency In
 
 - Define ports in the business layer as `Protocol` types (`UserRepository`, `DocumentRepository`).
 - Implement S3-backed adapters in infrastructure (`S3UserRepository`, etc.) that use `S3Client` internally.
-- In API tests, override the *repository provider* in the DI container with an in-memory fake — `S3Client` and `aioboto3` never run. This matches the pattern in `[./python-tests.md](./python-tests.md)` and the symmetric SQL example in `[./sqlalchemy.md](./sqlalchemy.md)`.
+- In API tests, override the *repository provider* in the DI container with an in-memory mock — `S3Client` and `aioboto3` never run. This matches the pattern in `[./python-tests.md](./python-tests.md)` and the symmetric SQL example in `[./sqlalchemy.md](./sqlalchemy.md)`.
 - Optional: a small contract suite can exercise a single adapter against moto or LocalStack to catch regressions in the S3 wire shape — but keep that suite separate from API tests, and do not stand up moto inside an API-test fixture.
 - For manual local runs, point `aioboto3` at MinIO or LocalStack via `endpoint_url=...` in the container's config — no test-code change required.
 

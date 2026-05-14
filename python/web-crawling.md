@@ -1,6 +1,6 @@
 # Web Crawling
 
-> Last updated: 2026-05-13
+> Last updated: 2026-05-14
 
 ## TL;DR
 
@@ -172,7 +172,7 @@ Async HTTP client wrapping `httpx.AsyncClient` with per-host rate limiting, retr
 
 ### Lifecycle
 
-- **Scope**: app-scoped Singleton — one instance per process.
+- **Scope**: App Scope (`Singleton`) — one instance per worker process.
 - **Created by**: FastAPI lifespan startup (`CrawlerHttpClient(settings)`); see [Wire Up](#wire-up).
 - **Shared by**: every crawler, worker, and tool that needs outbound HTTP — concurrent callers share the same client and pool.
 - **Cleaned up by**: FastAPI lifespan shutdown calls `await fetcher.aclose()` exactly once.
@@ -181,14 +181,14 @@ Async HTTP client wrapping `httpx.AsyncClient` with per-host rate limiting, retr
 
 ```text
 [App Scope]
-    └── [CrawlerHttpClient]              (singleton)
+    └── [CrawlerHttpClient]              (app-scoped Singleton)
             │ holds
-            ├── [httpx.AsyncClient]    (singleton, connection pool inside)
-            ├── [dict[host, AsyncLimiter]]  (per-host, lazy)
-            └── [asyncio.Semaphore]    (global concurrency cap)
+            ├── [httpx.AsyncClient]       (app-scoped owned client, connection pool inside)
+            ├── [dict[host, AsyncLimiter]](owned-transient entries, lazy per host)
+            └── [asyncio.Semaphore]       (app-scoped owned concurrency cap)
 
 [Request Scope]
-    └── [crawl worker] ── calls ──▶ [CrawlerHttpClient.get()]
+    └── [crawl worker] ── calls ──▶ [CrawlerHttpClient.get()] (request-owned call)
 ```
 
 ### Constraints
@@ -373,7 +373,7 @@ Async browser-context pool wrapping a single long-lived Playwright/Chromium proc
 
 ### Lifecycle
 
-- **Scope**: app-scoped Singleton — one Chromium process per app process.
+- **Scope**: App Scope (`Singleton`) — one Chromium process per worker process.
 - **Created by**: FastAPI lifespan startup calls `BrowserPool(settings)` then `await browser_pool.start()`. Startup is heavy (seconds — Chromium launch + stealth setup), so it must not happen on the request path.
 - **Shared by**: every crawl worker / tool that needs JS rendering; each worker borrows a context via the async context manager.
 - **Cleaned up by**: FastAPI lifespan shutdown calls `await browser_pool.stop()`, which closes the browser and stops Playwright in that order.
@@ -382,15 +382,16 @@ Async browser-context pool wrapping a single long-lived Playwright/Chromium proc
 
 ```text
 [App Scope]
-    └── [BrowserPool]              (singleton)
+    └── [BrowserPool]              (app-scoped Singleton)
             │ holds
-            ├── [Playwright]            (singleton)
-            ├── [Browser / Chromium]    (singleton process)
-            └── [BrowserContextFactory]   (per-request, concurrency-capped)
+            ├── [Playwright]            (app-scoped owned runtime)
+            ├── [Browser / Chromium]    (app-scoped owned process)
+            └── [BrowserContextFactory] (owned factory, concurrency-capped)
 
 [Request Scope]
     └── [crawl worker]
             └── async with [BrowserPool.context()] ── borrows ──▶ [BrowserContext]
+                                                       (owned-transient context)
                                                        returns on __aexit__
 ```
 

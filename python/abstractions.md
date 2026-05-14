@@ -1,6 +1,6 @@
 # Abstractions in Python: Protocol, ABC, Mixin, and Composition
 
-> Last updated: 2026-05-11
+> Last updated: 2026-05-14
 
 ## TL;DR
 
@@ -110,17 +110,17 @@ This is the strong safety net. The runtime check covered below is much weaker �
 
 #### Trade-off: discoverability
 
-Structural typing has a real cost: the implementation does not declare which port it satisfies. With an ABC, `class StripePaymentGateway(PaymentGateway):` advertises the relationship at the class definition. With Protocol you have to grep for callers or rely on type-checker output to find the link.
+Structural typing has a real cost: the implementation does not declare which port it satisfies. With an ABC, `class StripePaymentProcessor(PaymentProcessor):` advertises the relationship at the class definition. With Protocol you have to grep for callers or rely on type-checker output to find the link.
 
 Mitigate with naming and folder structure. Ports live in the application layer; concrete adapters live in infrastructure:
 
 ```text
 application/
     ports/
-        payment_gateway.py
+        payment_processor.py
 infrastructure/
-    stripe_payment_gateway.py
-    fake_payment_gateway.py
+    stripe_payment_processor.py
+    mock_payment_processor.py
 ```
 
 Explicit DI wiring helps too — the port type appears in the adapter's constructor signature (or the container config), making the relationship visible at the boundary that matters most.
@@ -299,7 +299,7 @@ class SqlUserRepository:
         self._session.add(user)
 ```
 
-`SqlUserRepository` satisfies `UserRepository` structurally — no `class SqlUserRepository(UserRepository)` declaration needed. Tests can substitute a `FakeUserRepository` with the same shape and zero ceremony.
+`SqlUserRepository` satisfies `UserRepository` structurally — no `class SqlUserRepository(UserRepository)` declaration needed. Tests can substitute a `MockUserRepository` with the same shape and zero ceremony.
 
 If the adapter genuinely needs reusable behavior (retry, instrumentation), prefer **composition** — inject a retrier or tracer in the constructor. Use a mixin only when the rules above genuinely apply.
 

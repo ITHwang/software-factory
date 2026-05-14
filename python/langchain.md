@@ -1,6 +1,6 @@
 # LangChain
 
-> Last updated: 2026-05-12
+> Last updated: 2026-05-14
 
 ## TL;DR
 
@@ -22,8 +22,8 @@ and streamed progress. For simple prompt-to-response calls with no tools, prefer
 the direct LiteLLM client in [`./litellm.md`](./litellm.md).
 
 This guide is async-first. The route calls a service/use-case, the service calls
-an agent gateway, and `dependency-injector` assembles the agent from passive
-configuration, a `langchain_litellm.ChatLiteLLM` model, tool gateways,
+an agent runner, and `dependency-injector` assembles the agent from passive
+configuration, a `langchain_litellm.ChatLiteLLM` model, tool adapters,
 middleware, and tracing callbacks.
 
 ## Table of Contents
@@ -41,7 +41,7 @@ middleware, and tracing callbacks.
 | Need | Default |
 |------|---------|
 | Agent constructor | `langchain.agents.create_agent(...)` |
-| Wiring | `dependency-injector` composes settings, clients, tools, middleware, factory, gateway |
+| Wiring | `dependency-injector` composes settings, clients, tools, middleware, factory, agent runner |
 | Model | `langchain_litellm.ChatLiteLLM`; direct LLM calls stay in [`./litellm.md`](./litellm.md) |
 | Runtime | LangGraph compiled graph behind the agent |
 | Async call | `await agent.ainvoke({"messages": [...]}, config=...)` |
@@ -49,7 +49,7 @@ middleware, and tracing callbacks.
 | Tools | Small async functions decorated with `@tool` |
 | Structured response | Pass a Pydantic model as `response_format` and read `state["structured_response"]` |
 | Middleware | Hooks into the LangGraph runtime: `before_agent`, `before_model`, `wrap_model_call`, `after_model`, `wrap_tool_call`, `after_agent`. LangChain ships built-ins for budgets, summarization, retries, fallback, HITL, PII |
-| API test boundary | Mock the agent gateway, not LangChain internals |
+| API test boundary | Mock the agent runner, not LangChain internals |
 
 ## When To Use
 
@@ -110,24 +110,24 @@ chain.
 ## Wire Up
 
 Keep LangChain out of route handlers. Build the agent once through the
-container, inject the gateway into services, and call the gateway from use-cases.
+container, inject the agent runner into services, and call the agent runner from use-cases.
 
 ```text
 HTTP request
   -> FastAPI route/controller
   -> service/use-case
-  -> AgentGateway
+  -> AgentRunner
   -> LangChain create_agent / LangGraph runtime
-  -> tools / outbound gateways
+  -> tools / outbound adapters
 ```
 
 The important ownership rule: settings are data, `AgentFactory` is the actor that constructs the agent, and the container decides what gets injected.
 
-Container wiring (the multi-provider agent chain — model, gateways, agent factory, top-level service) lives in [./dependency-injector.md#langchain](./dependency-injector.md#langchain).
+Container wiring (the multi-provider agent chain — model, adapters, agent factory, top-level service) lives in [./dependency-injector.md#langchain](./dependency-injector.md#langchain).
 
 ## Core Pattern
 
-The factory owns agent construction. The gateway owns invocation. Configuration
+The factory owns agent construction. The agent runner owns invocation. Configuration
 does not construct anything; it is injected into the factory.
 
 ```python
@@ -146,7 +146,7 @@ from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 
-class SearchGateway(Protocol):
+class WebSearcher(Protocol):
     async def search(self, query: str) -> list[str]: ...
 
 
@@ -168,11 +168,11 @@ def build_middlewares(settings: AgentSettings) -> list[AgentMiddleware]:
     ]
 
 
-def build_search_tool(search_gateway: SearchGateway):
+def build_search_tool(web_searcher: WebSearcher):
     @tool
     async def search_docs(query: str) -> str:
         """Search approved source documents for relevant snippets."""
-        hits = await search_gateway.search(query)
+        hits = await web_searcher.search(query)
         return "\n".join(hits)
 
     return search_docs
@@ -186,22 +186,22 @@ class AgentFactory:
         self,
         *,
         model: BaseChatModel,
-        search_gateway: SearchGateway,
+        web_searcher: WebSearcher,
         settings: AgentSettings,
         middlewares: Sequence[AgentMiddleware],
     ) -> None:
         self._model = model
-        self._search_gateway = search_gateway
+        self._web_searcher = web_searcher
         self._settings = settings
         self._middlewares = list(middlewares)
 
     def build(self) -> CompiledAgent: ...
 ```
 
-**AgentGateway** — **Purpose**: request-scoped facade in front of a shared compiled agent; turns service-layer questions into agent invocations. **Responsibilities**: format service input into agent input; call `ainvoke`; map agent output into the service-layer return type; raise on agent errors. **Must not**: compile its own agent (the compiled agent is injected); store per-call state across requests.
+**AgentRunner** — **Purpose**: request-scoped facade in front of a shared compiled agent; turns service-layer questions into agent invocations. **Responsibilities**: format service input into agent input; call `ainvoke`; map agent output into the service-layer return type; raise on agent errors. **Must not**: compile its own agent (the compiled agent is injected); store per-call state across requests.
 
 ```python
-class AgentGateway:
+class AgentRunner:
     def __init__(self, agent: CompiledAgent) -> None:
         self._agent = agent
 
@@ -223,13 +223,13 @@ shared with the other. Langfuse hooks attach to each separately — see
 
 Do not compile the agent inside the request handler. Construction binds the
 model, tools, middleware, and response schema. Reusing the compiled runtime
-keeps request latency predictable and makes tests patch one gateway boundary.
+keeps request latency predictable and makes tests patch one adapter boundary.
 
 See also: [LangChain `create_agent` docs](https://docs.langchain.com/oss/python/langchain/agents).
 
 ## Tools
 
-Tools should be narrow adapters over existing gateways, repositories, or
+Tools should be narrow adapters over existing adapters, repositories, or
 services. They are not a second business layer.
 
 | Rule | Why |
@@ -262,15 +262,15 @@ See also: [LangChain tools concept](https://python.langchain.com/docs/concepts/t
 
 ### Example
 
-A typical `@tool`-decorated coroutine wraps an existing async gateway:
+A typical `@tool`-decorated coroutine wraps an existing async adapter:
 
 ```python
 from langchain_core.tools import tool
 
-from .gateways import WebSearchGateway
+from .adapters import WebSearcher
 
 
-def build_web_search_tool(gateway: WebSearchGateway):
+def build_web_search_tool(web_searcher: WebSearcher):
     @tool
     async def web_search(query: str, limit: int = 5) -> str:
         """Search the web for recent pages matching the query.
@@ -279,13 +279,13 @@ def build_web_search_tool(gateway: WebSearchGateway):
             query: The user's search phrase.
             limit: Maximum number of results to return.
         """
-        results = await gateway.search(query=query, limit=limit)
+        results = await web_searcher.search(query=query, limit=limit)
         return "\n".join(f"- {r.title} ({r.url})" for r in results)
 
     return web_search
 ```
 
-The closure-over-gateway pattern keeps the tool a narrow adapter (rule 1) and threads request-bound dependencies in via the factory. Parallel tool calls are dispatched internally by `create_agent` — see [./langgraph.md#reducers](./langgraph.md#reducers) for the underlying `Send` primitive.
+The closure-over-adapter pattern keeps the tool a narrow adapter (rule 1) and threads request-bound dependencies in via the factory. Parallel tool calls are dispatched internally by `create_agent` — see [./langgraph.md#reducers](./langgraph.md#reducers) for the underlying `Send` primitive.
 
 See also: [LangChain custom tools how-to](https://python.langchain.com/docs/how_to/custom_tools/), [HTTPX async client](https://www.python-httpx.org/async_client/) (for tools that hit external APIs).
 
@@ -327,8 +327,7 @@ class SearchInput(BaseModel):
 
 
 @tool(args_schema=SearchInput)
-async def web_search(query: str, limit: int = 5) -> str:
-    ...
+async def web_search(query: str, limit: int = 5) -> str: ...
 ```
 
 Outputs go straight into the model's context as whatever the function returns (str, dict, list — `to_string` is best-effort). Return compact, parseable shapes; the rules table above applies.
@@ -552,13 +551,13 @@ See also: [LangChain structured-output docs](https://docs.langchain.com/oss/pyth
 ## Streaming
 
 Use `astream()` when the frontend needs progress or tokens. Keep the streaming
-translation in the gateway so the route only returns an async iterator.
+translation in the agent runner so the route only returns an async iterator.
 
 ```python
 from collections.abc import AsyncIterator
 
 
-class AgentGateway:
+class AgentRunner:
     ...
 
     async def stream_answer(
@@ -593,8 +592,8 @@ See also: [LangGraph streaming docs](https://docs.langchain.com/oss/python/langg
 
 ## FastAPI Example
 
-Route -> service -> gateway. The route owns HTTP shape, the service owns
-orchestration, and the gateway owns LangChain.
+Route -> service -> agent runner. The route owns HTTP shape, the service owns
+orchestration, and the agent runner owns LangChain.
 
 ```python
 # schemas.py
@@ -614,13 +613,13 @@ class AskResponseDTO(BaseModel):
 # services.py
 from collections.abc import AsyncIterator
 
-from .agents import AgentGateway
+from .agents import AgentRunner
 from .schemas import AskResponseDTO
 
 
 class AskService:
-    def __init__(self, agent_gateway: AgentGateway) -> None:
-        self._agent_gateway = agent_gateway
+    def __init__(self, agent_runner: AgentRunner) -> None:
+        self._agent_runner = agent_runner
 
     async def ask(
         self,
@@ -629,7 +628,7 @@ class AskService:
         user_id: str,
         question: str,
     ) -> AskResponseDTO:
-        answer = await self._agent_gateway.answer(
+        answer = await self._agent_runner.answer(
             request_id=request_id,
             user_id=user_id,
             question=question,
@@ -645,7 +644,7 @@ class AskService:
         request_id: str,
         question: str,
     ) -> AsyncIterator[str]:
-        async for token in self._agent_gateway.stream_answer(
+        async for token in self._agent_runner.stream_answer(
             request_id=request_id,
             question=question,
         ):
@@ -706,7 +705,7 @@ async def ask_stream(
 
 ## Testing
 
-API tests follow [`./python-tests.md`](./python-tests.md): replace the gateway
+API tests follow [`./python-tests.md`](./python-tests.md): replace the adapter
 boundary, then call the real route and service/use-case.
 
 ```python
@@ -718,14 +717,14 @@ from app.containers import Container
 from app.main import create_app
 
 
-class FakeAgentGateway:
+class MockAgentRunner:
     async def answer(self, *, request_id: str, user_id: str, question: str):
         return AgentAnswer(answer=f"Answered: {question}", citations=["doc-1"])
 
 
 async def test_ask_returns_agent_answer() -> None:
     container = Container()
-    container.agent_gateway.override(providers.Object(FakeAgentGateway()))
+    container.agent_runner.override(providers.Object(MockAgentRunner()))
     app = create_app(container=container)
     transport = ASGITransport(app=app)
 
@@ -738,10 +737,10 @@ async def test_ask_returns_agent_answer() -> None:
         "citations": ["doc-1"],
     }
 
-    container.agent_gateway.reset_override()
+    container.agent_runner.reset_override()
 ```
 
-Service tests can fake `AgentGateway`. Gateway tests should use a fake model or
+Service tests can mock `AgentRunner`. Agent runner tests should use a mock model or
 LangChain test double, not a real provider. Keep real LLM calls in a small,
 manually-triggered integration suite with explicit API-key requirements.
 
@@ -758,7 +757,7 @@ manually-triggered integration suite with explicit API-key requirements.
 - Keep prompt, model, temperature, and tool budgets in passive configuration.
 - Use DI factories, not config objects, to build agents.
 - Record token usage and provider/model names when the model response exposes them.
-- Mock the agent gateway in API tests and disable real tracing callbacks in tests.
+- Mock the agent runner in API tests and disable real tracing callbacks in tests.
 
 ## Pitfalls
 
@@ -774,11 +773,10 @@ manually-triggered integration suite with explicit API-key requirements.
 | Tool output too large | Return compact snippets, IDs, and summaries |
 | Parsing final prose | Use `response_format` and validate service-level invariants |
 | Assuming `response_format` works on every model | Coverage depends on tool-call support (or native structured output). Check `litellm.supports_response_schema(model)` and confirm the model can be tool-called |
-| Testing through real providers | Fake the gateway in API tests |
-| Leaking project wrappers into examples | Keep public guides on FastAPI, LangChain, and gateway interfaces |
+| Testing through real providers | Mock the agent runner in API tests |
+| Leaking project wrappers into examples | Keep public guides on FastAPI, LangChain, and adapter interfaces |
 | Blocking calls inside an async tool | Wrap in `await asyncio.to_thread(...)` or use an async SDK — sync calls stall every concurrent tool |
 | Tool output too large | Cap result counts and content length at the tool boundary, not in a downstream node — the output feeds back into model context |
 | No per-tool timeout | Use `async with asyncio.timeout(seconds):` inside the tool — a hanging external call ties up an agent iteration indefinitely |
 | LLM-emitted tool args bypassing schema validation | Pydantic validation runs on the dispatched args — but only if `args_schema` (or an inferable function signature) is set. A loose `**kwargs` tool signature skips validation entirely |
 | Swallowing `CancelledError` in a tool | Let it propagate so LangGraph can cancel the in-flight node on client disconnect or upstream timeout |
-

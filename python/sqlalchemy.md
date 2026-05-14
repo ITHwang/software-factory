@@ -1,6 +1,6 @@
 # Pragmatic SQL-First Persistence (SQLAlchemy + Raw SQL)
 
-> Last updated: 2026-05-12
+> Last updated: 2026-05-14
 
 ## TL;DR
 
@@ -253,15 +253,15 @@ See also: [Python `uuid`](https://docs.python.org/3.14/library/uuid.html).
 
 ## Engine & Session Lifecycle
 
-The engine is one async resource per process. The sessionmaker is an
-application-scoped singleton. Sessions are per-request, and the `RDBClient`
-that wraps each session is request-scoped via a FastAPI dependency — *not* a
-DI-container factory.
+The engine is one app-scoped async `Resource` per worker process. The
+sessionmaker is an app-scoped `Singleton`. Sessions are strict request-scoped,
+and the `RDBClient` that wraps each session is yielded by a FastAPI dependency
+— *not* a DI-container factory.
 
 The split is deliberate:
 
-- **DI container** owns long-lived infrastructure (engine, sessionmaker).
-- **FastAPI dependency** owns the request-scoped session + `RDBClient` and
+- **DI container** owns app-scoped infrastructure (engine, sessionmaker).
+- **FastAPI dependency** owns the strict request-scoped session + `RDBClient` and
   the request-lifecycle commit/rollback.
 
 Container wiring (engine + session_factory + the `get_rdb_client` FastAPI dependency) lives in [./dependency-injector.md#sqlalchemy](./dependency-injector.md#sqlalchemy). This section explains the architectural shape; that section is the canonical code.
@@ -318,7 +318,7 @@ Request-scoped SQL execution adapter that wraps an `AsyncSession` and exposes `e
 
 ### Lifecycle
 
-- **Scope:** request-scoped.
+- **Scope:** Request Scope (`Depends` / `yield` dependency).
 - **Created by:** the `get_rdb_client` FastAPI dependency factory, which opens a fresh `AsyncSession` from the singleton `session_factory` and constructs an `RDBClient` around it.
 - **Shared by:** every repository and service participating in the request — threaded explicitly as a method argument, not held as constructor state.
 - **Cleaned up by:** `get_rdb_client` at yield exit — commit on success, rollback on uncaught exception, session close in `finally`.
@@ -610,8 +610,8 @@ The flow, starting at the route:
 
 ```text
 Route handler
-    ↓ Depends(get_rdb_client) → RDBClient(session)
-    ↓ Depends(Provide[Container.user_service]) → UserService
+    ↓ Depends(get_rdb_client) → RDBClient(session)      (request-scoped Depends/yield)
+    ↓ Depends(Provide[Container.user_service]) → UserService  (request-owned Factory)
 service.method(rdb, ...)
     ↓
 repository.method(rdb, ...)
@@ -724,15 +724,16 @@ pattern — application logic is exercised through API tests that go through
 the full DI container.
 
 Persistence is mocked at the **port** boundary (`UserRepository` Protocol),
-not at `RDBClient`. A `FakeUserRepository` is overridden into the container,
-and the route handler exercises the full stack (FastAPI → service → fake
-repository) without touching a real database. We use `Fake*` rather than
-`Mock*` to match the adapter-naming convention from
-[./python-backend-architecture.md](./python-backend-architecture.md) — a fake
-is just another adapter, useful only in tests.
+not at `RDBClient`. A `MockUserRepository` is overridden into the container,
+and the route handler exercises the full stack (FastAPI → service → mock
+repository) without touching a real database. We use `Mock*` rather than
+`Fake*` to match the test-double convention from
+[./python-backend-architecture.md](./python-backend-architecture.md) — a mock
+is just another adapter, useful only in tests, and the name matches the
+stdlib `unittest.mock` vocabulary.
 
 ```python
-# tests/api/users/fake_repository.py
+# tests/api/users/mock_repository.py
 from uuid import UUID
 
 from application.users.dto import UserDTO
@@ -740,7 +741,7 @@ from application.users.ports.user_repository import UserRepository
 from persistence.rdb.rdb_client import RDBClient
 
 
-class FakeUserRepository:
+class MockUserRepository:
     """Structurally satisfies the `UserRepository` Protocol — no inheritance."""
 
     def __init__(self) -> None:
@@ -748,7 +749,7 @@ class FakeUserRepository:
         self._by_email: dict[str, UserDTO] = {}
 
     async def get_by_id(self, rdb: RDBClient, user_id: UUID) -> UserDTO | None:
-        # rdb accepted for Protocol conformance; unused by the in-memory fake.
+        # rdb accepted for Protocol conformance; unused by the in-memory mock.
         return self._by_id.get(user_id)
 
     async def find_by_email(self, rdb: RDBClient, email: str) -> UserDTO | None:
@@ -758,14 +759,14 @@ class FakeUserRepository:
         ...
 ```
 
-Method signatures on the fake take `rdb: RDBClient` as the first argument
+Method signatures on the mock take `rdb: RDBClient` as the first argument
 even though the body ignores it — Protocol conformance is structural, so the
 signature must match the port exactly.
 
-Wire the fake into the DI container at test setup:
+Wire the mock into the DI container at test setup:
 
 ```python
-container.user_repository.override(providers.Object(FakeUserRepository()))
+container.user_repository.override(providers.Object(MockUserRepository()))
 ```
 
 **Trade-off worth naming:** raw SQL never executes in CI under this policy.

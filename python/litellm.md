@@ -1,6 +1,6 @@
 # Provider-Neutral LLM Calls (LiteLLM)
 
-> Last updated: 2026-05-12
+> Last updated: 2026-05-14
 
 ## TL;DR
 
@@ -79,7 +79,7 @@ and other providers can sit behind the same client surface.
 | Layer | Responsibility | Where it lives |
 |-------|----------------|----------------|
 | LLM client | Multi-provider I/O — retries, error classification, structured-output translation, streaming, token usage | `LiteLLMClient` (this doc) |
-| Agent gateway | Tools, middleware, graph runtime, multi-step orchestration | `langchain_litellm.ChatLiteLLM` + LangChain (see [`./langchain.md`](./langchain.md)) |
+| Agent runner | Tools, middleware, graph runtime, multi-step orchestration | `langchain_litellm.ChatLiteLLM` + LangChain (see [`./langchain.md`](./langchain.md)) |
 
 `LiteLLMClient` is the LLM client implementation we use today. Future
 provider-specific clients (e.g., transports outside LiteLLM's coverage) would
@@ -132,7 +132,7 @@ class LiteLLMSettings(BaseModel):
     provider_kwargs: dict[str, Any] = Field(default_factory=dict)
 ```
 
-Container wiring (settings `Factory` + client `Singleton` + per-request service `Factory`) lives in [./dependency-injector.md#litellm](./dependency-injector.md#litellm).
+Container wiring (settings `Factory` + app-scoped client `Singleton` + request-owned service `Factory`) lives in [./dependency-injector.md#litellm](./dependency-injector.md#litellm).
 
 ## Core Pattern
 
@@ -508,7 +508,7 @@ from app.containers import Container
 from app.main import create_app
 
 
-class FakeLiteLLMClient:
+class MockLiteLLMClient:
     async def complete_text(self, messages):
         assert messages[-1]["content"] == "Long text"
         return "Short summary"
@@ -516,7 +516,7 @@ class FakeLiteLLMClient:
 
 async def test_create_summary() -> None:
     container = Container()
-    container.litellm_client.override(providers.Object(FakeLiteLLMClient()))
+    container.litellm_client.override(providers.Object(MockLiteLLMClient()))
     app = create_app(container=container)
     transport = ASGITransport(app=app)
 
@@ -529,7 +529,7 @@ async def test_create_summary() -> None:
     container.litellm_client.reset_override()
 ```
 
-Client unit tests can monkeypatch `litellm.acompletion` with an async fake and
+Client unit tests can monkeypatch `litellm.acompletion` with an async mock and
 assert retries, error classification, usage extraction, and response parsing.
 API tests should never call real LiteLLM providers.
 
@@ -559,4 +559,3 @@ API tests should never call real LiteLLM providers.
 | Depending on streamed usage everywhere | Treat stream usage as provider-dependent |
 | Real LLM calls in API tests | Override the client boundary |
 | Adopting a new provider without checking the translated request | Enable LiteLLM verbose logging once to confirm `response_format` and tool params translate correctly, then disable |
-

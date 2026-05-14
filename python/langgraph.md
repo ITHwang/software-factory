@@ -1,6 +1,6 @@
 # LangGraph
 
-> Last updated: 2026-05-12
+> Last updated: 2026-05-14
 
 ## TL;DR
 
@@ -14,9 +14,9 @@ How to build multi-step agent graphs on top of LangGraph: `create_agent` as the 
 **Don't use this for:**
 - one-shot prompt-to-response LLM calls → `./litellm.md`
 - per-tool primitives (`@tool`, `BaseTool`, `StructuredTool`, args validation) → `./langchain.md#tools`
-- middleware hooks, `response_format`, agent gateways → `./langchain.md`
+- middleware hooks, `response_format`, agent runners → `./langchain.md`
 
-How to build LangGraph graphs as implementations of agent-gateway ports. The runtime here is `langgraph.graph.StateGraph` and its `compile()` output (`CompiledStateGraph`); a graph is one implementation of whichever business-layer port it serves (`CompactionAgent`, `ResearchAgent`, …). For most graphs in this codebase, `langchain.agents.create_agent` is the building block — it returns a `CompiledStateGraph` directly, with the agent loop, tool dispatch, and parallel tool calls already wired up.
+How to build LangGraph graphs as implementations of agent-runner ports. The runtime here is `langgraph.graph.StateGraph` and its `compile()` output (`CompiledStateGraph`); a graph is one implementation of whichever business-layer port it serves (`CompactionAgent`, `ResearchAgent`, …). For most graphs in this codebase, `langchain.agents.create_agent` is the building block — it returns a `CompiledStateGraph` directly, with the agent loop, tool dispatch, and parallel tool calls already wired up.
 
 This guide is async-first. The production stack is `FastAPI → async LangGraph → async tools and LLM (await tool.ainvoke / await llm.ainvoke) → Send fan-out → reducer aggregation → astream streaming`. Async must propagate end-to-end; mixing sync calls into an async stack stalls the event loop. Mental model:
 
@@ -81,7 +81,7 @@ Optional integrations:
 
 ```bash
 uv add langfuse        # tracing callbacks, see ./langfuse.md
-uv add httpx           # async HTTP client for tool gateways
+uv add httpx           # async HTTP client for tool adapters
 ```
 
 This guide assumes Python 3.14, [LangGraph](https://github.com/langchain-ai/langgraph), and an event-loop runtime (FastAPI / Starlette / standalone `asyncio`).
@@ -496,7 +496,7 @@ Use the library types directly. A custom `MetaInput` / `RequestMeta` class drift
 
 ## Configuration
 
-Graph configuration flows through the DI container's `providers.Configuration(yaml_files=[...])` — the same mechanism every other gateway uses. There is **no** `configs/{ClassName}.yaml` convention: name your YAML files however the project's `app.yaml` / `graphs.yaml` layout makes sense, and let the container pass each graph the slice it needs.
+Graph configuration flows through the DI container's `providers.Configuration(yaml_files=[...])` — the same mechanism every other adapter uses. There is **no** `configs/{ClassName}.yaml` convention: name your YAML files however the project's `app.yaml` / `graphs.yaml` layout makes sense, and let the container pass each graph the slice it needs.
 
 ```yaml
 # configs/app.yaml
@@ -524,7 +524,7 @@ Tight checklist when introducing a new graph. Each line is the minimum bar — f
 - **Wire** as a Protocol-typed port in the business layer (`ResearchAgent`, `CompactionAgent`, …); the graph satisfies it structurally — no inheritance.
 - **Expose** via `providers.Singleton` in the container so the graph compiles once at startup.
 - **Service-exposed graphs** need a route + auth + rate-limit policy. See [./rate-limit.md](./rate-limit.md).
-- **Tests** in two paths: API tests mock the gateway Protocol; graph functional tests use `LLMToolEmulator` with a real LLM. See [Testing](#testing).
+- **Tests** in two paths: API tests mock the port Protocol; graph functional tests use `LLMToolEmulator` with a real LLM. See [Testing](#testing).
 
 ## Mixins
 
@@ -565,7 +565,7 @@ The hard rule: **mixins do not call `graph.add_node`, `graph.add_edge`, or `grap
 
 Two test paths, different purposes:
 
-- **API tests** verify the *backend* works functionally. Mock the gateway `Protocol` (a one-line fake satisfies it structurally); don't mock LiteLLM, individual tools, or anything below the port. Cheap, fast, deterministic.
+- **API tests** verify the *backend* works functionally. Mock the port `Protocol` (a one-line mock satisfies it structurally); don't mock LiteLLM, individual tools, or anything below the port. Cheap, fast, deterministic.
 - **Graph functional tests** verify the *graph* works functionally. Run against the real LLM (via `ChatLiteLLM`) and emulate tools with `langchain.agents.middleware.LLMToolEmulator` — the emulator itself calls a real LLM to generate plausible tool responses, so tools are stubbed without leaving the LLM-driven loop. Slower, real-LLM cost, non-deterministic — gate behind a marker for scheduled / pre-release runs (specific marker convention TBU).
 
 Test layout:
@@ -573,7 +573,7 @@ Test layout:
 ```
 tests/
   conftest.py
-  api/                    # API tests — gateway Protocol mocks
+  api/                    # API tests — port Protocol mocks
     test_research_route.py
   graphs/
     {domain}/             # graph functional tests with LLMToolEmulator
@@ -586,7 +586,7 @@ See also: [pytest](https://docs.pytest.org/en/stable/), [pytest-asyncio](https:/
 
 ### API Tests
 
-The agent gateway is a `Protocol`. Implement it structurally with a one-line dataclass fake — no inheritance, no scripted-LLM ceremony.
+The agent runner is a `Protocol`. Implement it structurally with a one-line dataclass mock — no inheritance, no scripted-LLM ceremony.
 
 ```python
 # tests/api/conftest.py
@@ -631,7 +631,7 @@ def container(mock_agent: MockResearchAgent) -> Container:
     container.research_agent.reset_override()
 ```
 
-Then the route test exercises route + DI; everything below the port is the trivial fake:
+Then the route test exercises route + DI; everything below the port is the trivial mock:
 
 ```python
 # tests/api/test_research_route.py
@@ -698,8 +698,8 @@ See also: [`LLMToolEmulator` reference](https://reference.langchain.com/python/l
 
 ### Testing Pitfalls
 
-- **Inheriting from the gateway `Protocol` in your fake.** Protocol is structural — implementing the methods is enough. Inheritance is the wrong tool here (see [./abstractions.md](./abstractions.md) for the ABC vs. Protocol vs. Mixin split).
-- **Mocking LiteLLM or individual tools in API tests.** The gateway encapsulates them — overriding lower layers means you're testing the wrong seam.
+- **Inheriting from the port `Protocol` in your mock.** Protocol is structural — implementing the methods is enough. Inheritance is the wrong tool here (see [./abstractions.md](./abstractions.md) for the ABC vs. Protocol vs. Mixin split).
+- **Mocking LiteLLM or individual tools in API tests.** The agent runner encapsulates them — overriding lower layers means you're testing the wrong seam.
 - **Asserting exact strings on LLM output.** Real LLMs vary across runs. Assert on substrings, length bounds, structured-output fields, or message-count bounds.
 - **Forgetting that `LLMToolEmulator` still calls a real LLM.** It emulates *tools* via an LLM, not "removes the LLM." If you want zero-cost tests, that's the API path (Protocol mock). The two paths exist for different reasons.
 - **Mocking the LangGraph runtime.** The runtime is the thing under test in graph functional tests; mocking it means the test only proves the test wrote itself.
