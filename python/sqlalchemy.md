@@ -1,4 +1,4 @@
-# Pragmatic SQL-First Persistence (SQLAlchemy + Raw SQL)
+# SQLAlchemy: Pragmatic Persistence
 
 > Last updated: 2026-05-14
 
@@ -412,7 +412,7 @@ class AgentService:
 
     async def run_agent(self, rdb: RDBClient, command: str) -> RunDTO:
         run = await self.run_repo.create_started(rdb, command)
-        await rdb.commit()                          # durable checkpoint
+        await rdb.commit()  # durable checkpoint
         result = await self.agent.run(command)
         await self.run_repo.mark_completed(rdb, run.id, result)
         return run
@@ -469,7 +469,8 @@ class SqlMapper(Generic[RepositoryT]):
     def __init__(self, repo_impl: type[RepositoryT], sql_path: Path) -> None:
         self._queries = _load_sql(sql_path)
         impl_methods = {
-            n for n, _ in inspect.getmembers(repo_impl, inspect.isfunction)
+            n
+            for n, _ in inspect.getmembers(repo_impl, inspect.isfunction)
             if not n.startswith("_")
         }
         sql_names = set(self._queries.keys())
@@ -558,8 +559,10 @@ from persistence.rdb.sql_mapper import SqlMapper
 
 
 class PostgresUserRepository:
-    def __init__(self) -> None:                                # no rdb at construction
-        self._sql = SqlMapper(PostgresUserRepository, Path(__file__).parent / "users.sql")
+    def __init__(self) -> None:  # no rdb at construction
+        self._sql = SqlMapper(
+            PostgresUserRepository, Path(__file__).parent / "users.sql"
+        )
 
     async def get_by_id(self, rdb: RDBClient, user_id: UUID) -> UserDTO | None:
         result = await rdb.execute(self._sql["get_by_id"], {"id": user_id})
@@ -755,8 +758,7 @@ class MockUserRepository:
     async def find_by_email(self, rdb: RDBClient, email: str) -> UserDTO | None:
         return self._by_email.get(email)
 
-    async def create(self, rdb: RDBClient, email: str, name: str) -> UserDTO:
-        ...
+    async def create(self, rdb: RDBClient, email: str, name: str) -> UserDTO: ...
 ```
 
 Method signatures on the mock take `rdb: RDBClient` as the first argument

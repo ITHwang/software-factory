@@ -1,4 +1,4 @@
-# Provider-Neutral LLM Calls (LiteLLM)
+# LiteLLM: Provider-Neutral LLM Calls
 
 > Last updated: 2026-05-14
 

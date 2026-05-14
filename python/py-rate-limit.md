@@ -1,4 +1,4 @@
-# Rate Limiting
+# Rate Limit w/ Python
 
 > Last updated: 2026-05-14
 
@@ -154,6 +154,7 @@ The slowapi limit decorator requires the route handler's first argument to be th
 ```python
 from fastapi import Request
 
+
 @app.get("/items/{item_id}")
 @limiter.limit("100/minute")
 async def read_item(request: Request, item_id: int) -> dict:
@@ -166,8 +167,7 @@ Stack decorators to compose limits:
 @app.post("/search")
 @limiter.limit("10/second")
 @limiter.limit("100/minute")
-async def search(request: Request) -> list[dict]:
-    ...
+async def search(request: Request) -> list[dict]: ...
 ```
 
 Decorator parameters:
@@ -215,15 +215,15 @@ limiter = Limiter(
 ```python
 search_limit = limiter.shared_limit("60/minute", scope="search")
 
+
 @app.get("/search/items")
 @search_limit
-async def search_items(request: Request) -> list[dict]:
-    ...
+async def search_items(request: Request) -> list[dict]: ...
+
 
 @app.get("/search/users")
 @search_limit
-async def search_users(request: Request) -> list[dict]:
-    ...
+async def search_users(request: Request) -> list[dict]: ...
 ```
 
 A request to either route increments the same `search` counter — useful when several endpoints hit the same expensive downstream (a search index, an LLM, a third-party API) and you want one shared budget across them.
@@ -281,6 +281,7 @@ def user_or_ip_key(request: Request) -> str:
         return f"user:{user_id}"
     return f"ip:{get_remote_address(request)}"
 
+
 limiter = Limiter(key_func=user_or_ip_key, default_limits=["20/minute"])
 ```
 
@@ -291,8 +292,7 @@ Override per-route when one endpoint needs a different identity:
 ```python
 @app.post("/admin/reindex")
 @limiter.limit("1/minute", key_func=lambda r: f"tenant:{r.state.tenant_id}")
-async def reindex(request: Request) -> None:
-    ...
+async def reindex(request: Request) -> None: ...
 ```
 
 ## Conditional Exemption
@@ -304,6 +304,7 @@ The two-decorator pattern below applies different limits to authenticated vs. an
 ```python
 def is_authenticated(request: Request) -> bool:
     return getattr(request.state, "user_id", None) is not None
+
 
 @app.get("/public/ping")
 @limiter.limit("100/minute", exempt_when=lambda r: not is_authenticated(r))
@@ -345,6 +346,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 from slowapi.errors import RateLimitExceeded
 
+
 @app.exception_handler(RateLimitExceeded)
 async def rate_limit_handler(request: Request, exc: RateLimitExceeded) -> JSONResponse:
     return JSONResponse(
@@ -374,6 +376,7 @@ Disable the limiter inside tests so quota math does not pollute behavior asserti
 ```python
 import pytest
 from fastapi.testclient import TestClient
+
 
 @pytest.fixture
 def client(app) -> TestClient:
