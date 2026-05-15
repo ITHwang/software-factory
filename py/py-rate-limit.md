@@ -13,7 +13,7 @@ Rate-limit a FastAPI service: per-IP / per-user / per-API-key quotas, shared cou
 
 **Don't use this for:**
 - backpressure on outbound calls → use `asyncio.Semaphore` at the call site
-- auth / quota enforcement → `./cognito-auth.md`
+- auth / quota enforcement → `./py-auth.md`
 - cost budgeting inside an LLM agent loop → `ModelCallLimitMiddleware` in `./langchain.md`
 
 ## Table of Contents

@@ -116,7 +116,7 @@ How to add a Redis-backed cache to a FastAPI service: client, key conventions, T
 
 **Don't use this for:**
 - in-process memoization → `functools.lru_cache` (stdlib)
-- session storage → `./cognito-auth.md`
+- session storage → `./py/py-auth.md`
 
 ## Table of Contents
 

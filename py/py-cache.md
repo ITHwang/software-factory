@@ -19,7 +19,7 @@ table when durability beats hit rate.
 
 **Don't use this for:**
 - in-process memoization → [Layer 1](#layer-1-function-memoization-single-process-in-memory)
-- session/auth state → `./cognito-auth.md`
+- session/auth state → `./py-auth.md`
 - vector similarity caches → `./milvus.md`
 
 ## Table of Contents

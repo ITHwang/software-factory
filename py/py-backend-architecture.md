@@ -202,7 +202,7 @@ Services are framework-agnostic. The boundary is sharp.
 **Strict request-scope exceptions.** Two cases use FastAPI's `Depends(...)` instead of plain `Provide`, because their lifecycle is tied to the request itself, not to the app-scoped container:
 
 - **`RDBClient`** (per-request transactional session). Routes receive it via `Depends(get_rdb_client)` and thread it into service method calls. See [`./sqlalchemy.md`](./sqlalchemy.md) for the worked pattern.
-- **Auth context** (`CurrentUser`, derived from the request's bearer token). Routes receive it via `Depends(get_current_user)`. See [`./cognito-auth.md`](./cognito-auth.md) for the worked pattern.
+- **Auth context** (`CurrentUser`, derived from the request's bearer token). Routes receive it via `Depends(get_current_user)`. See [`./py-auth.md`](./py-auth.md) for the worked pattern.
 
 Both exceptions exist because the underlying state is **strict request-scoped**. Everything else (app-scoped singletons/resources, request-owned factory services, services holding ports) flows through `dependency-injector`'s `@inject` + `Provide`.
 
