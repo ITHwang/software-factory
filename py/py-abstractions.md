@@ -86,7 +86,7 @@ If you genuinely need explicit inheritance — runtime polymorphism, shared stat
 
 #### What static checkers actually catch
 
-Protocol is not informal duck typing. `mypy` and `pyright` validate the **full method signature** structurally — parameter types, parameter count, optional and default arguments, return types, async-vs-sync, generic compatibility. Per `[setup-toolchains.md](./setup-toolchains.md)`, mypy is the pre-commit/CI gate; pyright runs in editors. Same checking capability, different gating role.
+Protocol is not informal duck typing. `mypy` and `pyright` validate the **full method signature** structurally — parameter types, parameter count, optional and default arguments, return types, async-vs-sync, generic compatibility. Per `[py-setup-toolchains.md](./py-setup-toolchains.md)`, mypy is the pre-commit/CI gate; pyright runs in editors. Same checking capability, different gating role.
 
 ```python
 from typing import Protocol
