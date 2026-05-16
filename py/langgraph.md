@@ -1,8 +1,22 @@
 # LangGraph
 
-> Last updated: 2026-05-10
+> Last updated: 2026-05-14
 
-How to build LangGraph graphs as implementations of agent-gateway ports. The runtime here is `langgraph.graph.StateGraph` and its `compile()` output (`CompiledStateGraph`); a graph is one implementation of whichever business-layer port it serves (`CompactionAgent`, `ResearchAgent`, …). For most graphs in this codebase, `langchain.agents.create_agent` is the building block — it returns a `CompiledStateGraph` directly, with the agent loop, tool dispatch, and parallel tool calls already wired up.
+## TL;DR
+
+How to build multi-step agent graphs on top of LangGraph: `create_agent` as the default building block, raw `StateGraph` for exotic topology, reducers for parallel-branch aggregation, streaming, per-request context, testing.
+
+**Use this when:**
+- building a tool-loop agent or supervisor-subagent architecture
+- you need `Send`-based parallel fan-out and reducer aggregation
+- you need to stream execution events (token chunks, custom events, state updates) from a running graph
+
+**Don't use this for:**
+- one-shot prompt-to-response LLM calls → `./litellm.md`
+- per-tool primitives (`@tool`, `BaseTool`, `StructuredTool`, args validation) → `./langchain.md#tools`
+- middleware hooks, `response_format`, agent runners → `./langchain.md`
+
+How to build LangGraph graphs as implementations of agent-runner ports. The runtime here is `langgraph.graph.StateGraph` and its `compile()` output (`CompiledStateGraph`); a graph is one implementation of whichever business-layer port it serves (`CompactionAgent`, `ResearchAgent`, …). For most graphs in this codebase, `langchain.agents.create_agent` is the building block — it returns a `CompiledStateGraph` directly, with the agent loop, tool dispatch, and parallel tool calls already wired up.
 
 This guide is async-first. The production stack is `FastAPI → async LangGraph → async tools and LLM (await tool.ainvoke / await llm.ainvoke) → Send fan-out → reducer aggregation → astream streaming`. Async must propagate end-to-end; mixing sync calls into an async stack stalls the event loop. Mental model:
 
@@ -15,14 +29,16 @@ This guide is async-first. The production stack is `FastAPI → async LangGraph 
 | Streaming       | `async for ... in graph.astream(...)` |
 
 
-This guide layers ABOVE [./langchain.md](./langchain.md): the single-agent `create_agent` / `@tool` / `astream` primitives belong there. For tools, see [./langgraph-tools.md](./langgraph-tools.md); for streaming and `Runtime` / `stream_writer`, see [./langgraph-streaming.md](./langgraph-streaming.md); for tests, see [./langgraph-testing.md](./langgraph-testing.md).
+This guide layers ABOVE [./langchain.md](./langchain.md): the single-agent `create_agent` / `@tool` / `astream` primitives belong there. For tools, see [./langchain.md#tools](./langchain.md#tools); for streaming and `Runtime` / `stream_writer`, see [Streaming](#streaming); for tests, see [Testing](#testing).
 
+
+## Table of Contents
 
 | Phase         | Section                                                                                                                                                 |
 | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 1. Concepts   | [Quick Reference](#quick-reference), [When To Use](#when-to-use)                                                                                        |
 | 2. Setup      | [Install](#install), [Wire Up](#wire-up)                                                                                                                |
-| 3. Build      | [Building A Graph](#building-a-graph), [Architecture Examples](#architecture-examples), [Reducers](#reducers)                                           |
+| 3. Build      | [Building A Graph](#building-a-graph), [Architecture Examples](#architecture-examples), [Reducers](#reducers), [Streaming](#streaming)                  |
 | 4. Cross-cuts | [Per-request context](#per-request-context), [Configuration](#configuration), [Adding A Graph](#adding-a-graph), [Mixins](#mixins), [Testing](#testing) |
 | 5. Operate    | [Production Checklist](#production-checklist), [Pitfalls](#pitfalls)                                                                                    |
 
@@ -41,6 +57,8 @@ Two agent architectures cover most multi-step work, both built on `langchain.age
 
 
 Anything more exotic is just nodes + edges on a raw `StateGraph` — drop down to that only when `create_agent`'s loop genuinely doesn't fit.
+
+See also: [LangGraph docs](https://langchain-ai.github.io/langgraph/).
 
 ## When To Use
 
@@ -63,7 +81,7 @@ Optional integrations:
 
 ```bash
 uv add langfuse        # tracing callbacks, see ./langfuse.md
-uv add httpx           # async HTTP client for tool gateways
+uv add httpx           # async HTTP client for tool adapters
 ```
 
 This guide assumes Python 3.14, [LangGraph](https://github.com/langchain-ai/langgraph), and an event-loop runtime (FastAPI / Starlette / standalone `asyncio`).
@@ -81,41 +99,11 @@ class ResearchAgent(Protocol):
     async def run(self, input_state) -> object: ...
 ```
 
-The container builds the implementation once at startup and hands it to the route. The container shape follows [./dependency-injector.md](./dependency-injector.md).
+The container builds the implementation once at startup and hands it to the route.
 
-```python
-# containers.py
-from dependency_injector import containers, providers
-from langchain_litellm import ChatLiteLLM
+Container wiring (`Singleton` per compiled graph — building is expensive, so the graph is built once at startup) lives in [./dependency-injector.md#langgraph](./dependency-injector.md#langgraph).
 
-from .graphs import CompactionGraph, ResearchGraph
-
-
-class Container(containers.DeclarativeContainer):
-    config = providers.Configuration(yaml_files=["configs/app.yaml"])
-
-    chat_model = providers.Singleton(
-        ChatLiteLLM,
-        model=config.llm.model,
-        temperature=config.llm.temperature,
-    )
-
-    # One Singleton per concrete graph. Each graph compiles its StateGraph
-    # in __init__ and reuses it across requests; per-request context flows
-    # via Runtime[ContextT] and RunnableConfig — see Per-request context.
-    compaction_agent = providers.Singleton(
-        CompactionGraph,
-        chat_model=chat_model,
-        config=config.graphs.compaction,
-    )
-    research_agent = providers.Singleton(
-        ResearchGraph,
-        chat_model=chat_model,
-        config=config.graphs.research,
-    )
-```
-
-`providers.Singleton` is correct for compiled graphs: building the topology and binding nodes is expensive and must happen at startup. If a route accepts a request-driven choice between graphs, do that selection in the route handler with a small `match` block — there is no global registry.
+If a route accepts a request-driven choice between graphs, do that selection in the route handler with a small `match` block — there is no global registry.
 
 ## Building A Graph
 
@@ -177,6 +165,8 @@ agent = create_agent(
 
 Cross-link [LangChain middleware overview](https://docs.langchain.com/oss/python/langchain/middleware/overview) for the hook surface and built-in middleware inventory; see [./langchain.md#middleware](./langchain.md#middleware) for our composition guidance.
 
+See also: [`AgentState` reference](https://reference.langchain.com/python/langchain/agents/middleware/AgentState), [Pydantic models](https://docs.pydantic.dev/latest/concepts/models/).
+
 ### When To Drop To Raw `StateGraph`
 
 Drop to `StateGraph` only when topology genuinely doesn't fit `create_agent`'s loop — exotic routing, parallel fanout outside tool calls, or a multi-step pipeline that isn't an agent. State for raw `StateGraph` can be `TypedDict`, `@dataclass`, or `pydantic.BaseModel` (`langgraph._internal._typing.StateLike` documents the union — private, so reference, don't import). Every node is `async def`.
@@ -211,73 +201,94 @@ def _build() -> StateGraph:
 
 This is no longer the spine of the doc — most LangGraph code in this codebase lives behind `create_agent`.
 
+See also: [LangGraph low-level concepts](https://langchain-ai.github.io/langgraph/concepts/low_level/).
+
 ## Architecture Examples
 
 Two architectures, both built on `create_agent`.
 
 ### One-agent architecture
 
+#### Purpose
+
+Single LLM + tool-set agent for tasks where one decision loop suffices.
+
+#### Responsibilities
+
+- Define a single `AgentState` TypedDict for the run.
+- Register the tool list at construction.
+- Compile once at startup via `create_agent`.
+- Emit observability events (token usage, custom stream events) for the run.
+
+#### Must not
+
+- Hand off to subordinate agents — use the supervisor pattern instead.
+- Own per-request state across invocations — request data lives on the input state.
+
 One `create_agent` with a few tools. All context lives on a single shared `AgentState`. The agent's model can emit multiple parallel tool calls in one `AIMessage`, and `create_agent` dispatches them in parallel via `Send("tools", [tool_call])` (see `langchain/agents/factory.py:1743`) — no work in user code.
 
 ```python
 from langchain.agents import create_agent
-from langchain_core.messages import HumanMessage
+from langchain.agents.middleware import AgentState
 from langchain_litellm import ChatLiteLLM
 
 
-class OneAgentResearch:
-    def __init__(self, *, chat_model: ChatLiteLLM, config: dict) -> None:
-        self.compiled = create_agent(
-            model=chat_model,
-            tools=[search_tool, fetch_tool],
-            system_prompt=config["system_prompt"],
-        )
+class OneAgentResearchState(AgentState):
+    query: str
 
-    async def run(self, *, query: str) -> str:
-        result = await self.compiled.ainvoke({"messages": [HumanMessage(query)]})
-        return result["messages"][-1].content
+
+class OneAgentResearch:
+    def __init__(self, *, chat_model: ChatLiteLLM, config: dict) -> None: ...
+    async def run(self, *, query: str) -> str: ...
 ```
+
+Tool registration order at construction: `[search_tool, fetch_tool]` — passed into `create_agent(model=..., tools=..., state_schema=OneAgentResearchState, system_prompt=...)`. `self.compiled` holds the resulting `CompiledStateGraph`.
 
 Use this when one agent can hold the entire context: the user's question, the tool calls, and the final answer fit on one message thread without overflowing the model's context window.
 
 ### Supervisor-subagent architecture
 
+#### Purpose
+
+Orchestrator agent that routes work to one or more subordinate agents.
+
+#### Responsibilities
+
+- Own routing decisions: which subordinate runs for which subtask.
+- Own the shared state shape that crosses subordinates (input handoff, aggregated output).
+- Coordinate subordinate composition (fixed-tool vs. delegated-tool subordinates).
+- Emit per-subordinate trace info (which subordinate ran, with what arguments, with what outcome).
+
+#### Must not
+
+- Do the subordinates' work itself — if the supervisor needs full subordinate context, the boundary is wrong.
+- Require subordinates to share a single tool set — each subordinate picks its own tools (own or delegated).
+- Own per-request session for individual subordinate runtime — each subordinate run is isolated to its tool-call scope.
+
 A supervisor `create_agent` that binds *subagent-tools*. Each subagent-tool, when invoked, runs an isolated inner `create_agent` with its own `AgentState`. The supervisor's only job is to **route and delegate**: which subagent, what task, what partial context. Each subagent sees only what the supervisor passes via the tool's arguments — never the supervisor's full message history.
 
 ```python
 from langchain.agents import create_agent
-from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool
 from langchain_litellm import ChatLiteLLM
 
 
 @tool
-async def research_subagent(task: str, focus_keywords: list[str]) -> str:
-    """Spawn a research subagent with isolated context.
+async def research_subagent(task: str, focus_keywords: list[str]) -> str: ...
 
-    Args:
-        task: The delegated subtask to research.
-        focus_keywords: Hints to narrow the subagent's search.
-    """
-    inner = create_agent(
-        model=ChatLiteLLM(model="gpt-5.2"),
-        tools=[search_tool, fetch_tool],
-        system_prompt=f"Research focus: {focus_keywords}. Task: {task}",
-    )
-    output = await inner.ainvoke({"messages": [HumanMessage(task)]})
-    return output["messages"][-1].content
+
+@tool
+async def summarize_subagent(task: str, sources: list[str]) -> str: ...
 
 
 supervisor = create_agent(
     model=ChatLiteLLM(model="gpt-5.2"),
     tools=[research_subagent, summarize_subagent],
-    system_prompt=(
-        "Decompose the user's question into subtasks. "
-        "Spawn research_subagent or summarize_subagent in parallel "
-        "for each subtask. Combine the results into a final answer."
-    ),
+    system_prompt="...decompose; spawn subagents in parallel; combine results...",
 )
 ```
+
+Tool registration order on the supervisor: `[research_subagent, summarize_subagent]` — each subagent body builds its own inner `create_agent` with its own tool list and `AgentState`, invoked via `await inner.ainvoke(...)`.
 
 Design rules:
 
@@ -361,6 +372,87 @@ Key elements:
 
 `create_agent` already does this internally for parallel tool calls — you only build a custom planner / fanout / aggregate when the parallelism is *outside* the model's tool-call loop.
 
+See also: [LangGraph state-reducers how-to](https://langchain-ai.github.io/langgraph/how-tos/state-reducers/).
+
+## Streaming
+
+How to surface execution events from a running graph. The runtime is `graph.astream(stream_mode=...)` — no custom event bus, no `asyncio.Queue`. Producers emit; consumers iterate the async iterator. Async stack required end-to-end (FastAPI → graph → tools → LLM). How those events reach a client (SSE framing, WebSocket, heartbeats, cancellation propagation) is transport, not LangGraph — handle at the route layer.
+
+### `stream_mode`
+
+What kind of execution data gets streamed back while the graph runs:
+
+
+| Mode       | What it yields                                | Typical use                          |
+| ---------- | --------------------------------------------- | ------------------------------------ |
+| `updates`  | State **delta** returned by each node         | Progress updates, normal backend use |
+| `messages` | LLM tokens/messages as they arrive            | Chat UI token streaming              |
+| `custom`   | Whatever you wrote via `stream_writer({...})` | Tool progress, status, logs          |
+| `values`   | Full graph state after each step              | Debugging / full inspection          |
+
+
+Pick one, or pass a list to multiplex. With a list, the iterator yields `(mode, chunk)` tuples so the consumer can dispatch on `mode`. `updates` is the usual default; for chat UIs, `["updates", "messages"]` is the common combination.
+
+```python
+async for chunk in graph.astream(input_state, stream_mode="updates"):
+    print(chunk)
+```
+
+```python
+async for mode, chunk in graph.astream(
+    input_state,
+    stream_mode=["updates", "messages"],
+):
+    if mode == "updates":
+        print("state update:", chunk)
+    elif mode == "messages":
+        token, metadata = chunk
+        print("llm token:", token.content)
+```
+
+See also: [LangGraph streaming concepts](https://langchain-ai.github.io/langgraph/concepts/streaming/), [`astream` reference](https://langchain-ai.github.io/langgraph/reference/graphs/#langgraph.graph.state.CompiledStateGraph.astream).
+
+### `stream_writer` — emitting custom events
+
+LangGraph exposes a writer via the run's contextvar. Producers call it with arbitrary dicts; the consumer sees those dicts under `mode == "custom"`. Give every event a `type` discriminator so the consumer can dispatch and ignore unknown shapes.
+
+From a middleware hook — `Runtime` exposes the writer:
+
+```python
+from langchain.agents.middleware import before_agent
+from langgraph.runtime import Runtime
+
+
+@before_agent
+async def announce_start(state, runtime: Runtime) -> None:
+    runtime.stream_writer({"type": "progress", "stage": "thinking"})
+```
+
+From a raw `StateGraph` node — resolve via `langgraph.config`:
+
+```python
+from langgraph.config import get_stream_writer
+
+
+async def fetch_node(state):
+    write = get_stream_writer()
+    write({"type": "tool_event", "tool_type": "fetch", "status": "started"})
+    results = await fetch_tool.ainvoke(state["query"])
+    write({"type": "tool_event", "tool_type": "fetch", "status": "completed"})
+    return {"fetched": results}
+```
+
+Sub-graph events (e.g., an inner `create_agent` invoked as a tool) inherit the parent's stream context and appear in the outer `astream` output automatically — no extra wiring.
+
+See also: [`get_stream_writer` reference](https://langchain-ai.github.io/langgraph/reference/config/#langgraph.config.get_stream_writer).
+
+### Streaming Pitfalls
+
+- **Calling `graph.invoke(...)` from a streaming caller.** Sync `invoke` blocks the event loop and never yields chunks. Use `astream`.
+- **Default `stream_mode` is `values`.** Useful for debugging, rarely useful for UI. Pick a mode deliberately.
+- **No `type` on custom events.** Frontend has nothing to dispatch on. Always include a discriminator.
+- **Calling `get_stream_writer()` from a background thread or `asyncio.to_thread` helper.** The writer is a contextvar — without explicit propagation it isn't there. Emit from inside the async graph.
+
 ## Per-request context
 
 Per-request data — `request_id`, `user_id`, `tenant_id`, tracing fields — flows through library-provided types. Don't invent a custom carrier.
@@ -370,7 +462,7 @@ Per-request data — `request_id`, `user_id`, `tenant_id`, tracing fields — fl
 | --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Typed per-request context         | `Runtime[ContextT]` — parameterize `ContextT` with a project-defined `TypedDict`. `ModelRequest.runtime` carries it through middleware; nodes receive it as a parameter.                            |
 | `run_id`, `metadata`, `callbacks` | `RunnableConfig` — passed via `agent.ainvoke(input, config={...})`                                                                                                                                  |
-| Custom stream events              | `runtime.stream_writer({...})` (inside middleware hooks) or `langgraph.config.get_stream_writer()({...})` (inside raw `StateGraph` nodes); see [./langgraph-streaming.md](./langgraph-streaming.md) |
+| Custom stream events              | `runtime.stream_writer({...})` (inside middleware hooks) or `langgraph.config.get_stream_writer()({...})` (inside raw `StateGraph` nodes); see [Streaming](#streaming)                              |
 
 
 One illustrative `RequestContext` shape (yours will differ — fields are per-project, not canon):
@@ -404,7 +496,7 @@ Use the library types directly. A custom `MetaInput` / `RequestMeta` class drift
 
 ## Configuration
 
-Graph configuration flows through the DI container's `providers.Configuration(yaml_files=[...])` — the same mechanism every other gateway uses. There is **no** `configs/{ClassName}.yaml` convention: name your YAML files however the project's `app.yaml` / `graphs.yaml` layout makes sense, and let the container pass each graph the slice it needs.
+Graph configuration flows through the DI container's `providers.Configuration(yaml_files=[...])` — the same mechanism every other adapter uses. There is **no** `configs/{ClassName}.yaml` convention: name your YAML files however the project's `app.yaml` / `graphs.yaml` layout makes sense, and let the container pass each graph the slice it needs.
 
 ```yaml
 # configs/app.yaml
@@ -417,16 +509,9 @@ graphs:
     max_iterations: 12
 ```
 
-```python
-# containers.py
-compaction_agent = providers.Singleton(
-    CompactionGraph,
-    chat_model=chat_model,
-    config=config.graphs.compaction,
-)
-```
+The container passes each graph its config slice (e.g. `config=config.graphs.compaction`) at construction. See [./dependency-injector.md#langgraph](./dependency-injector.md#langgraph) for the full wiring and the [`Configuration` provider walkthrough](./dependency-injector.md).
 
-See [./dependency-injector.md](./dependency-injector.md) for the full `Configuration` provider walkthrough.
+See also: [dependency-injector `Configuration` provider](https://python-dependency-injector.ets-labs.org/providers/configuration.html).
 
 ## Adding A Graph
 
@@ -438,8 +523,8 @@ Tight checklist when introducing a new graph. Each line is the minimum bar — f
 - **Configure** via the DI container (`providers.Configuration(yaml_files=[...])`) — no per-class YAML mandate. See [./dependency-injector.md](./dependency-injector.md).
 - **Wire** as a Protocol-typed port in the business layer (`ResearchAgent`, `CompactionAgent`, …); the graph satisfies it structurally — no inheritance.
 - **Expose** via `providers.Singleton` in the container so the graph compiles once at startup.
-- **Service-exposed graphs** need a route + auth + rate-limit policy. See [./slowapi.md](./slowapi.md).
-- **Tests** in two paths: API tests mock the gateway Protocol; graph functional tests use `LLMToolEmulator` with a real LLM. See [./langgraph-testing.md](./langgraph-testing.md).
+- **Service-exposed graphs** need a route + auth + rate-limit policy. See [./rate-limit.md](./rate-limit.md).
+- **Tests** in two paths: API tests mock the port Protocol; graph functional tests use `LLMToolEmulator` with a real LLM. See [Testing](#testing).
 
 ## Mixins
 
@@ -480,10 +565,144 @@ The hard rule: **mixins do not call `graph.add_node`, `graph.add_edge`, or `grap
 
 Two test paths, different purposes:
 
-- **API tests** verify the *backend* works functionally. Mock the gateway `Protocol` (a one-line fake satisfies it structurally); don't mock LiteLLM, individual tools, or anything below the port.
-- **Graph functional tests** verify the *graph* works functionally. Run against the real LLM (via `LiteLLMClient` / `ChatLiteLLM`) and emulate tools with `langchain.agents.middleware.LLMToolEmulator`.
+- **API tests** verify the *backend* works functionally. Mock the port `Protocol` (a one-line mock satisfies it structurally); don't mock LiteLLM, individual tools, or anything below the port. Cheap, fast, deterministic.
+- **Graph functional tests** verify the *graph* works functionally. Run against the real LLM (via `ChatLiteLLM`) and emulate tools with `langchain.agents.middleware.LLMToolEmulator` — the emulator itself calls a real LLM to generate plausible tool responses, so tools are stubbed without leaving the LLM-driven loop. Slower, real-LLM cost, non-deterministic — gate behind a marker for scheduled / pre-release runs (specific marker convention TBU).
 
-See [./langgraph-testing.md](./langgraph-testing.md) for the full pattern.
+Test layout:
+
+```
+tests/
+  conftest.py
+  api/                    # API tests — port Protocol mocks
+    test_research_route.py
+  graphs/
+    {domain}/             # graph functional tests with LLMToolEmulator
+      test_research_graph.py
+```
+
+For app-lifespan setup, `pytest_asyncio.fixture` wiring, and `LifespanManager`, see [./python-tests.md](./python-tests.md).
+
+See also: [pytest](https://docs.pytest.org/en/stable/), [pytest-asyncio](https://pytest-asyncio.readthedocs.io/en/latest/), [pytest markers](https://docs.pytest.org/en/stable/how-to/mark.html).
+
+### API Tests
+
+The agent runner is a `Protocol`. Implement it structurally with a one-line dataclass mock — no inheritance, no scripted-LLM ceremony.
+
+```python
+# tests/api/conftest.py
+from dataclasses import dataclass, field
+from typing import Any
+
+from app.business.ports import ResearchAgent  # Protocol
+
+
+@dataclass
+class MockResearchAgent:
+    """Implements ResearchAgent structurally — no inheritance needed."""
+
+    output: Any
+    calls: list[Any] = field(default_factory=list)
+
+    async def run(self, input_state) -> Any:
+        self.calls.append(input_state)
+        return self.output
+```
+
+Wire via a DI override fixture — see [./dependency-injector.md](./dependency-injector.md):
+
+```python
+# tests/api/conftest.py (continued)
+import pytest
+from dependency_injector import providers
+
+from app.containers import Container
+
+
+@pytest.fixture
+def mock_agent() -> MockResearchAgent:
+    return MockResearchAgent(output=None)
+
+
+@pytest.fixture
+def container(mock_agent: MockResearchAgent) -> Container:
+    container = Container()
+    container.research_agent.override(providers.Object(mock_agent))
+    yield container
+    container.research_agent.reset_override()
+```
+
+Then the route test exercises route + DI; everything below the port is the trivial mock:
+
+```python
+# tests/api/test_research_route.py
+from app.schemas import ResearchOutputState
+
+
+async def test_research_route_returns_agent_output(client, mock_agent):
+    mock_agent.output = ResearchOutputState(answer="found it")
+
+    response = await client.post("/research/run", json={"query": "..."})
+
+    assert response.status_code == 200
+    assert response.json()["answer"] == "found it"
+    assert mock_agent.calls[0].query == "..."
+```
+
+For repository / vector DB / external service mocking, override the corresponding container providers the same way.
+
+See also: [`typing.Protocol`](https://docs.python.org/3/library/typing.html#typing.Protocol), [Dependency Injector overriding](https://python-dependency-injector.ets-labs.org/providers/overriding.html), [FastAPI testing dependencies](https://fastapi.tiangolo.com/advanced/testing-dependencies/), [HTTPX async client](https://www.python-httpx.org/async_client/).
+
+### Graph Functional Tests
+
+Check that the graph itself produces sensible behavior end-to-end with the real LLM. To keep tools off the network, use `langchain.agents.middleware.LLMToolEmulator` as middleware: the emulator short-circuits real tool execution and asks an LLM to generate a plausible tool response based on the tool's name, description, and arguments.
+
+```python
+# tests/graphs/research/test_research_graph.py
+from langchain.agents import create_agent
+from langchain.agents.middleware import LLMToolEmulator
+from langchain_core.messages import HumanMessage
+from langchain_litellm import ChatLiteLLM
+
+from app.tools import fetch_tool, search_tool
+
+
+async def test_research_agent_finds_relevant_sources():
+    agent = create_agent(
+        model=ChatLiteLLM(model="gpt-5.2"),
+        tools=[search_tool, fetch_tool],
+        middleware=[
+            LLMToolEmulator(),  # emulate ALL tools by default
+        ],
+        system_prompt="You are a research assistant.",
+    )
+
+    result = await agent.ainvoke({
+        "messages": [HumanMessage("Find recent papers on transformer scaling laws")]
+    })
+
+    final = result["messages"][-1].content
+    assert isinstance(final, str)
+    assert len(final) > 50
+    assert "transformer" in final.lower() or "scaling" in final.lower()
+```
+
+Notes:
+
+- **`LLMToolEmulator()` with no args emulates all tools.** Pass tool names or `BaseTool` instances to emulate selectively: `LLMToolEmulator(tools=["search_tool"])` keeps `fetch_tool` real (rare — usually you emulate everything in tests).
+- **Default emulation model** is `anthropic:claude-sonnet-4-5-20250929`. Override with `LLMToolEmulator(model="openai:gpt-4o")` or pass a `BaseChatModel` instance.
+- **Real LLM calls cost money and aren't deterministic.** Don't run them on every PR — run them on a schedule or before release. Marker convention is TBU; until settled, declare any marker you use in `pyproject.toml` under `markers = [...]` and run with `--strict-markers`.
+- **Behavioral assertions, not exact strings.** Assert that the final answer contains the topic, isn't empty, and has the expected shape. Don't assert exact strings — the LLM produces variation.
+- **Graph topology is the LLM's job to navigate.** Don't assert on node order or visited paths inside `create_agent`'s loop — that's an implementation detail of LangChain. Assert on inputs and outputs.
+
+See also: [`LLMToolEmulator` reference](https://reference.langchain.com/python/langchain/agents/middleware/tool_emulator/LLMToolEmulator).
+
+### Testing Pitfalls
+
+- **Inheriting from the port `Protocol` in your mock.** Protocol is structural — implementing the methods is enough. Inheritance is the wrong tool here (see [./abstractions.md](./abstractions.md) for the ABC vs. Protocol vs. Mixin split).
+- **Mocking LiteLLM or individual tools in API tests.** The agent runner encapsulates them — overriding lower layers means you're testing the wrong seam.
+- **Asserting exact strings on LLM output.** Real LLMs vary across runs. Assert on substrings, length bounds, structured-output fields, or message-count bounds.
+- **Forgetting that `LLMToolEmulator` still calls a real LLM.** It emulates *tools* via an LLM, not "removes the LLM." If you want zero-cost tests, that's the API path (Protocol mock). The two paths exist for different reasons.
+- **Mocking the LangGraph runtime.** The runtime is the thing under test in graph functional tests; mocking it means the test only proves the test wrote itself.
 
 ## Checkpointer (Optional)
 
@@ -514,7 +733,7 @@ For the deeper API (`aget_state`, `aget_state_history`, `interrupt(...)`, `Comma
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Graph instances          | Built once at startup as `providers.Singleton`; never construct in a route handler                                                                                                                                                                            |
 | State shape              | `langchain.agents.middleware.AgentState` (or a TypedDict extending it) for `create_agent`-based graphs; `TypedDict` / `@dataclass` / `BaseModel` for raw `StateGraph`                                                                                         |
-| Per-request context      | Pass via `Runtime[ContextT]` (typed) or `RunnableConfig` (`run_id` / `metadata` / `callbacks`). For custom streaming events, use `runtime.stream_writer` or `langgraph.config.get_stream_writer()` — see [./langgraph-streaming.md](./langgraph-streaming.md) |
+| Per-request context      | Pass via `Runtime[ContextT]` (typed) or `RunnableConfig` (`run_id` / `metadata` / `callbacks`). For custom streaming events, use `runtime.stream_writer` or `langgraph.config.get_stream_writer()` — see [Streaming](#streaming)                                                                                |
 | Async nodes              | Every node is `async def`. Use `await llm.ainvoke(...)` and `await tool.ainvoke(...)` — never the sync versions                                                                                                                                               |
 | Graph execution          | `await graph.ainvoke(...)` or `async for ... in graph.astream(...)` — never `graph.invoke(...)` from an async stack                                                                                                                                           |
 | Reducers                 | Declare `Annotated[list[...], add_messages]` or `operator.add` (or a custom reducer) for any field two parallel branches write to                                                                                                                             |
@@ -536,17 +755,3 @@ For the deeper API (`aget_state`, `aget_state_history`, `interrupt(...)`, `Comma
 - **Sharing mutable state across requests on the graph instance.** The compiled graph is a singleton; per-request data lives in the state passed to `ainvoke`. Never store request-scoped data as `self.something` on the graph.
 - **Forgetting reducers on parallel writes.** Two `Send`-fanned-out workers both updating `state.results` will silently overwrite unless `Annotated[list[...], operator.add]` is declared.
 - **Skipping schema control.** For `create_agent`-based graphs, use `OmitFromInput` / `OmitFromOutput` / `PrivateStateAttr` annotations to keep internal state out of the API. For raw `StateGraph`, pass `input_schema=` and `output_schema=` to `StateGraph(...)`.
-
-## References
-
-- [https://langchain-ai.github.io/langgraph/](https://langchain-ai.github.io/langgraph/)
-- [https://langchain-ai.github.io/langgraph/concepts/low_level/](https://langchain-ai.github.io/langgraph/concepts/low_level/)
-- [https://langchain-ai.github.io/langgraph/how-tos/state-reducers/](https://langchain-ai.github.io/langgraph/how-tos/state-reducers/)
-- [https://langchain-ai.github.io/langgraph/concepts/persistence/](https://langchain-ai.github.io/langgraph/concepts/persistence/)
-- [https://docs.langchain.com/oss/python/langchain/agents](https://docs.langchain.com/oss/python/langchain/agents)
-- [https://docs.langchain.com/oss/python/langchain/middleware/overview](https://docs.langchain.com/oss/python/langchain/middleware/overview)
-- [https://reference.langchain.com/python/langchain/agents/middleware/AgentState](https://reference.langchain.com/python/langchain/agents/middleware/AgentState)
-- [https://reference.langchain.com/python/langchain/agents/middleware/tool_emulator/LLMToolEmulator](https://reference.langchain.com/python/langchain/agents/middleware/tool_emulator/LLMToolEmulator)
-- [https://github.com/langchain-ai/langgraph](https://github.com/langchain-ai/langgraph)
-- [https://docs.pydantic.dev/latest/concepts/models/](https://docs.pydantic.dev/latest/concepts/models/)
-- [https://python-dependency-injector.ets-labs.org/providers/configuration.html](https://python-dependency-injector.ets-labs.org/providers/configuration.html)

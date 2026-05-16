@@ -1,6 +1,20 @@
-# Provider-Neutral LLM Calls (LiteLLM)
+# LiteLLM: Provider-Neutral LLM Calls
 
-> Last updated: 2026-05-09
+> Last updated: 2026-05-14
+
+## TL;DR
+
+How to use LiteLLM from an async FastAPI backend for direct, provider-neutral prompt-to-response LLM calls: client wrapping, retries, streaming, structured output, error classification, usage extraction.
+
+**Use this when:**
+- one-shot LLM tasks: summarization, classification, translation, extraction, rewriting
+- you need provider-neutral routing across OpenAI/Anthropic/Bedrock/Azure/etc.
+- you need fine-grained retry, error classification, or token-usage accounting on direct calls
+
+**Don't use this for:**
+- tool-using agent loops with multi-step reasoning → `./langchain.md`
+- multi-graph topologies, `Send` fan-out, reducers → `./langgraph.md`
+- tracing/observability → `./langfuse.md` (attaches as a callback)
 
 How to use LiteLLM from an async FastAPI backend. `LiteLLMClient` is the
 implementation of the LLM client layer for direct, prompt-to-response tasks:
@@ -12,6 +26,8 @@ The backend shape is route → service/use-case → `LiteLLMClient`. The client
 owns provider-neutral LiteLLM calls, retries, streaming, structured output,
 error classification, and usage extraction. Tools live on the agent layer and
 are not managed here.
+
+## Table of Contents
 
 | Phase | Section |
 |-------|---------|
@@ -35,6 +51,8 @@ are not managed here.
 | Usage | Read `response.usage` or chunk usage when included by the provider |
 | LangChain agent integration | Use `langchain_litellm.ChatLiteLLM` directly; see [`./langchain.md`](./langchain.md) |
 | API test boundary | Mock `LiteLLMClient`, not LiteLLM itself |
+
+See also: [LiteLLM docs home](https://docs.litellm.ai/), [LiteLLM repo](https://github.com/BerriAI/litellm).
 
 ## When To Use
 
@@ -61,7 +79,7 @@ and other providers can sit behind the same client surface.
 | Layer | Responsibility | Where it lives |
 |-------|----------------|----------------|
 | LLM client | Multi-provider I/O — retries, error classification, structured-output translation, streaming, token usage | `LiteLLMClient` (this doc) |
-| Agent gateway | Tools, middleware, graph runtime, multi-step orchestration | `langchain_litellm.ChatLiteLLM` + LangChain (see [`./langchain.md`](./langchain.md)) |
+| Agent runner | Tools, middleware, graph runtime, multi-step orchestration | `langchain_litellm.ChatLiteLLM` + LangChain (see [`./langchain.md`](./langchain.md)) |
 
 `LiteLLMClient` is the LLM client implementation we use today. Future
 provider-specific clients (e.g., transports outside LiteLLM's coverage) would
@@ -114,42 +132,18 @@ class LiteLLMSettings(BaseModel):
     provider_kwargs: dict[str, Any] = Field(default_factory=dict)
 ```
 
-```python
-# containers.py
-from dependency_injector import containers, providers
-
-from .litellm_client import LiteLLMClient, LiteLLMSettings
-from .services import SummaryService
-
-
-class Container(containers.DeclarativeContainer):
-    config = providers.Configuration(yaml_files=["configs/app.yaml"])
-
-    litellm_settings = providers.Factory(
-        LiteLLMSettings,
-        model=config.llm.model,
-        temperature=config.llm.temperature.as_float(),
-        max_tokens=config.llm.max_tokens.as_int(),
-        timeout_seconds=config.llm.timeout_seconds.as_float(),
-        api_base=config.llm.api_base,
-        custom_llm_provider=config.llm.custom_llm_provider,
-        provider_kwargs=config.llm.provider_kwargs,
-    )
-    litellm_client = providers.Singleton(
-        LiteLLMClient,
-        settings=litellm_settings,
-    )
-
-    summary_service = providers.Factory(
-        SummaryService,
-        litellm_client=litellm_client,
-    )
-```
+Container wiring (settings `Factory` + app-scoped client `Singleton` + request-owned service `Factory`) lives in [./dependency-injector.md#litellm](./dependency-injector.md#litellm).
 
 ## Core Pattern
 
 Keep the LiteLLM call, provider option merging, error mapping, and response
 extraction in one client.
+
+**Purpose:** unified async client over the LiteLLM SDK that hides provider differences from services and emits typed completions.
+
+**Responsibilities:** own provider configuration (model, `api_base`, headers); call LiteLLM's completion API; map LiteLLM errors into a small set of typed exceptions; expose async text completions and structured (Pydantic-validated) completions.
+
+**Must not:** own retry policy (decorated externally via `@retry`); own token accounting (callers extract from response); own per-call provider switching (one client per configured provider).
 
 ```python
 # litellm_client.py
@@ -171,47 +165,31 @@ class LiteLLMClientError(Exception):
 
 
 class LiteLLMClient:
-    def __init__(self, settings: LiteLLMSettings) -> None:
-        self._settings = settings
+    def __init__(self, settings: LiteLLMSettings) -> None: ...
 
-    async def complete_text(self, messages: Sequence[Message]) -> str:
-        response = await self.acomplete(messages=messages)
-        return response.choices[0].message.content or ""
+    async def complete_text(self, messages: Sequence[Message]) -> str: ...
 
     async def complete_structured(
         self,
         messages: Sequence[Message],
         response_model: type[StructuredT],
-    ) -> StructuredT:
-        response = await self.acomplete(
-            messages=messages,
-            response_format=response_model,
-        )
-        content = response.choices[0].message.content or "{}"
-        return response_model.model_validate_json(content)
+    ) -> StructuredT: ...
 
-    async def acomplete(self, messages: Sequence[Message], **kwargs):
-        request: dict[str, Any] = {
-            "model": self._settings.model,
-            "messages": list(messages),
-            "temperature": self._settings.temperature,
-            "max_tokens": self._settings.max_tokens,
-            "timeout": self._settings.timeout_seconds,
-            "api_base": self._settings.api_base,
-            "custom_llm_provider": self._settings.custom_llm_provider,
-            **self._settings.provider_kwargs,
-            **kwargs,
-        }
-        request = {key: value for key, value in request.items() if value is not None}
-        try:
-            return await litellm.acompletion(**request)
-        except Exception as exc:
-            raise classify_litellm_error(exc) from exc
+    async def acomplete(self, messages: Sequence[Message], **kwargs: Any) -> Any: ...
 ```
+
+`acomplete` merges configured defaults with per-call `kwargs`, drops `None`
+entries, and delegates to `litellm.acompletion`; exceptions pass through
+`classify_litellm_error` (see [Retries And Errors](#retries-and-errors)).
+`complete_text` returns `response.choices[0].message.content`;
+`complete_structured` passes `response_format=response_model` and validates the
+returned JSON with `response_model.model_validate_json`.
 
 Never call `litellm.completion()` from an async FastAPI request handler. It is a
 blocking call and will stall the event loop. Reserve sync completion for CLI
 scripts, migrations, and offline jobs.
+
+See also: [LiteLLM completion input](https://docs.litellm.ai/docs/completion/input), [LiteLLM request/response patterns](https://docs.litellm.ai/docs/guides/core_request_response_patterns).
 
 ## Structured Output
 
@@ -253,6 +231,8 @@ this translation as the default.
 > [Inspecting Provider Requests](#inspecting-provider-requests)). The
 > translation is mostly transparent but can drift on nested schemas, optional
 > fields, and tool calling.
+
+See also: [LiteLLM JSON mode](https://docs.litellm.ai/docs/completion/json_mode), [LangChain structured output](https://docs.langchain.com/oss/python/langchain/structured-output).
 
 ## Inspecting Provider Requests
 
@@ -433,6 +413,8 @@ integration.
 Do not build direct prompt-to-answer flows with LangChain just to call the LLM.
 That adds an agent framework where a provider-neutral client is enough.
 
+See also: [LiteLLM tool integrations](https://docs.litellm.ai/docs/guides/tools_integrations), [`langchain-litellm` repo](https://github.com/langchain-ai/langchain-litellm).
+
 ## FastAPI Example
 
 Route -> service -> client.
@@ -468,14 +450,12 @@ class SummaryService:
         return SummaryResponseDTO(summary=summary)
 ```
 
+DI wiring for these routes (`@inject` + `Depends(Provide[Container.summary_service])`) lives in [./dependency-injector.md#litellm](./dependency-injector.md#litellm). Route bodies focus on tool capability below.
+
 ```python
 # routes.py
-from typing import Annotated
+from fastapi import APIRouter
 
-from dependency_injector.wiring import Provide, inject
-from fastapi import APIRouter, Depends
-
-from .containers import Container
 from .schemas import SummaryRequestDTO, SummaryResponseDTO
 from .services import SummaryService
 
@@ -483,10 +463,9 @@ router = APIRouter()
 
 
 @router.post("/summaries", response_model=SummaryResponseDTO)
-@inject
 async def create_summary(
     payload: SummaryRequestDTO,
-    service: Annotated[SummaryService, Depends(Provide[Container.summary_service])],
+    service: SummaryService,  # injected via container
 ) -> SummaryResponseDTO:
     return await service.summarize(payload.text)
 ```
@@ -494,21 +473,15 @@ async def create_summary(
 Streaming route:
 
 ```python
-from dependency_injector.wiring import Provide, inject
 from fastapi.responses import StreamingResponse
 
-from .containers import Container
 from .litellm_client import LiteLLMClient
 
 
 @router.post("/summaries/stream")
-@inject
 async def stream_summary(
     payload: SummaryRequestDTO,
-    litellm_client: Annotated[
-        LiteLLMClient,
-        Depends(Provide[Container.litellm_client]),
-    ],
+    litellm_client: LiteLLMClient,  # injected via container
 ) -> StreamingResponse:
     messages = [
         {"role": "system", "content": "Summarize in three concise bullets."},
@@ -535,7 +508,7 @@ from app.containers import Container
 from app.main import create_app
 
 
-class FakeLiteLLMClient:
+class MockLiteLLMClient:
     async def complete_text(self, messages):
         assert messages[-1]["content"] == "Long text"
         return "Short summary"
@@ -543,7 +516,7 @@ class FakeLiteLLMClient:
 
 async def test_create_summary() -> None:
     container = Container()
-    container.litellm_client.override(providers.Object(FakeLiteLLMClient()))
+    container.litellm_client.override(providers.Object(MockLiteLLMClient()))
     app = create_app(container=container)
     transport = ASGITransport(app=app)
 
@@ -556,7 +529,7 @@ async def test_create_summary() -> None:
     container.litellm_client.reset_override()
 ```
 
-Client unit tests can monkeypatch `litellm.acompletion` with an async fake and
+Client unit tests can monkeypatch `litellm.acompletion` with an async mock and
 assert retries, error classification, usage extraction, and response parsing.
 API tests should never call real LiteLLM providers.
 
@@ -586,14 +559,3 @@ API tests should never call real LiteLLM providers.
 | Depending on streamed usage everywhere | Treat stream usage as provider-dependent |
 | Real LLM calls in API tests | Override the client boundary |
 | Adopting a new provider without checking the translated request | Enable LiteLLM verbose logging once to confirm `response_format` and tool params translate correctly, then disable |
-
-## References
-
-- https://docs.litellm.ai/
-- https://docs.litellm.ai/docs/completion/input
-- https://docs.litellm.ai/docs/completion/json_mode
-- https://docs.litellm.ai/docs/guides/core_request_response_patterns
-- https://docs.litellm.ai/docs/guides/tools_integrations
-- https://github.com/BerriAI/litellm
-- https://github.com/langchain-ai/langchain-litellm
-- https://docs.langchain.com/oss/python/langchain/structured-output

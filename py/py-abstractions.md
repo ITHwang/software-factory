@@ -1,6 +1,28 @@
 # Abstractions in Python: Protocol, ABC, Mixin, and Composition
 
-> Last updated: 2026-05-10
+> Last updated: 2026-05-14
+
+## TL;DR
+
+How to choose between `Protocol`, `ABC`, mixin, and composition in Python — a design reference for DDD / Ports-and-Adapters codebases where the application/domain layers depend on capability contracts rather than infrastructure hierarchies.
+
+**Use this when:**
+- choosing between a capability contract (Protocol) and a lifecycle base class (ABC)
+- deciding whether shared infrastructure behavior should be a mixin or a composed collaborator
+- designing a port or adapter and unsure which abstraction encodes the right intent
+
+**Don't use this for:**
+- Python language tutorial — this doc assumes you know each mechanism syntactically
+- DI container shape → `./dependency-injector.md`
+- specific data-shape choices (`TypedDict` vs `BaseModel`) → `./typed-data-structures.md`
+
+## Table of Contents
+
+| Phase | Section |
+|-------|---------|
+| 1. Concepts | [Quick Reference](#quick-reference), [Core Concepts](#core-concepts) |
+| 2. Decide | [Decision Rules](#decision-rules), [Recommended Pattern](#recommended-pattern-protocol--composition-or-mixin--concrete) |
+| 3. Avoid | [Pitfalls](#pitfalls) |
 
 Python offers four overlapping mechanisms for expressing abstraction and reuse: `Protocol`, `ABC`, mixins, and composition. They look interchangeable at first but encode distinct architectural intentions. This doc explains how to choose between them in DDD / Ports-and-Adapters codebases, where the application and domain layers must depend on capability contracts rather than infrastructure hierarchies.
 
@@ -64,7 +86,7 @@ If you genuinely need explicit inheritance — runtime polymorphism, shared stat
 
 #### What static checkers actually catch
 
-Protocol is not informal duck typing. `mypy` and `pyright` validate the **full method signature** structurally — parameter types, parameter count, optional and default arguments, return types, async-vs-sync, generic compatibility. Per `[setup-toolchains.md](./setup-toolchains.md)`, mypy is the pre-commit/CI gate; pyright runs in editors. Same checking capability, different gating role.
+Protocol is not informal duck typing. `mypy` and `pyright` validate the **full method signature** structurally — parameter types, parameter count, optional and default arguments, return types, async-vs-sync, generic compatibility. Per `[py-setup-toolchains.md](./py-setup-toolchains.md)`, mypy is the pre-commit/CI gate; pyright runs in editors. Same checking capability, different gating role.
 
 ```python
 from typing import Protocol
@@ -88,17 +110,17 @@ This is the strong safety net. The runtime check covered below is much weaker �
 
 #### Trade-off: discoverability
 
-Structural typing has a real cost: the implementation does not declare which port it satisfies. With an ABC, `class StripePaymentGateway(PaymentGateway):` advertises the relationship at the class definition. With Protocol you have to grep for callers or rely on type-checker output to find the link.
+Structural typing has a real cost: the implementation does not declare which port it satisfies. With an ABC, `class StripePaymentProcessor(PaymentProcessor):` advertises the relationship at the class definition. With Protocol you have to grep for callers or rely on type-checker output to find the link.
 
 Mitigate with naming and folder structure. Ports live in the application layer; concrete adapters live in infrastructure:
 
 ```text
 application/
     ports/
-        payment_gateway.py
+        payment_processor.py
 infrastructure/
-    stripe_payment_gateway.py
-    fake_payment_gateway.py
+    stripe_payment_processor.py
+    mock_payment_processor.py
 ```
 
 Explicit DI wiring helps too — the port type appears in the adapter's constructor signature (or the container config), making the relationship visible at the boundary that matters most.
@@ -218,6 +240,8 @@ The collaborator (`session`) is explicit — it appears in the constructor signa
 
 Composition is what most "I want shared behavior" cases actually want. Reach for a mixin only when composition will not fit (see Decision Rules).
 
+See also: [PEP 544 — Protocols: Structural subtyping](https://peps.python.org/pep-0544/), [`typing.Protocol`](https://docs.python.org/3/library/typing.html#typing.Protocol), [`abc` — Abstract Base Classes](https://docs.python.org/3/library/abc.html).
+
 ## Decision Rules
 
 ### Protocol vs ABC
@@ -275,9 +299,11 @@ class SqlUserRepository:
         self._session.add(user)
 ```
 
-`SqlUserRepository` satisfies `UserRepository` structurally — no `class SqlUserRepository(UserRepository)` declaration needed. Tests can substitute a `FakeUserRepository` with the same shape and zero ceremony.
+`SqlUserRepository` satisfies `UserRepository` structurally — no `class SqlUserRepository(UserRepository)` declaration needed. Tests can substitute a `MockUserRepository` with the same shape and zero ceremony.
 
 If the adapter genuinely needs reusable behavior (retry, instrumentation), prefer **composition** — inject a retrier or tracer in the constructor. Use a mixin only when the rules above genuinely apply.
+
+See also: [`./langgraph.md`](./langgraph.md), [`./dependency-injector.md`](./dependency-injector.md) — both use DDD ports in this codebase.
 
 ## Pitfalls
 
@@ -287,10 +313,4 @@ If the adapter genuinely needs reusable behavior (retry, instrumentation), prefe
 - **ABCs do not render cleanly in `help()`** — abstract methods show as regular methods in interactive help. Document the contract explicitly in docstrings or a README.
 - **Forgetting `super().__init__()`** in an ABC subclass that defines its own `__init__` silently skips base-class state setup. Common with `DomainEvent`-style ABCs that initialize IDs/timestamps in the base.
 
-## References
-
-- [PEP 544 — Protocols: Structural subtyping](https://peps.python.org/pep-0544/)
-- [abc — Abstract Base Classes](https://docs.python.org/3/library/abc.html)
-- [typing.Protocol](https://docs.python.org/3/library/typing.html#typing.Protocol)
-- [typing.runtime_checkable](https://docs.python.org/3/library/typing.html#typing.runtime_checkable)
-- [langgraph.md](./langgraph.md), [dependency-injector.md](./dependency-injector.md) — both reference DDD ports in this codebase.
+See also: [`typing.runtime_checkable`](https://docs.python.org/3/library/typing.html#typing.runtime_checkable).

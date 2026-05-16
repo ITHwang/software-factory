@@ -1,9 +1,25 @@
 # Choosing Typed Data Structures
 
-> Last updated: 2026-05-10
+> Last updated: 2026-05-11
+
+## TL;DR
+
+How to pick the right typed container in Python: `dict[K, V]`, `TypedDict`, `dataclass`, `BaseModel`, `tuple`, `namedtuple`, `Literal`, `Enum`, `Protocol`.
+
+**Use this when:**
+- modelling structured data and unsure which container to reach for
+- choosing between `TypedDict` and `dataclass` for an internal record type
+- deciding when validation (`BaseModel`) is worth the runtime cost
+
+**Don't use this for:**
+- SQL-row models → `./sqlalchemy.md` (uses `SQLModel`)
+- LangGraph agent state schemas → `./langgraph.md#building-a-graph`
+- LangChain tool input schemas → `./langchain.md#tool-io`
 
 Python offers `dict[K, V]`, `TypedDict`, `dataclass`, `BaseModel`, `tuple`, `namedtuple`, `Literal`, `Enum`, and `Protocol` for representing structured data.
 
+
+## Table of Contents
 
 | Phase               | Section                                                                                                                                                                                                                                                                                                                |
 | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -212,7 +228,7 @@ For depth — Protocol vs ABC vs mixin, `@runtime_checkable` caveats, default me
 
 ## See Also
 
-- `[./python-guidelines.md](./python-guidelines.md)` — overall typing conventions and Data Modeling & Validation defaults.
+- `[./README.md](./README.md)` — Python folder index.
 - `[./abstractions.md](./abstractions.md)` — Protocol, ABC, mixin, and composition in depth.
 - `[./preprocessor-pipeline.md](./preprocessor-pipeline.md)` — `StrEnum` + `to_class()` dispatch as a worked example.
 - `[./langgraph-graph-architecture.md](./langgraph-graph-architecture.md)` — `TypedDict` as graph state schema.

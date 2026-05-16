@@ -1,6 +1,20 @@
 # LangChain
 
-> Last updated: 2026-05-09
+> Last updated: 2026-05-14
+
+## TL;DR
+
+How to use LangChain agents in an async FastAPI backend: `create_agent`, tool primitives (`@tool`, `BaseTool`, `StructuredTool`), middleware (budgets, retries, fallback, HITL), structured output via `response_format`, streaming.
+
+**Use this when:**
+- the workflow needs a tool-using agent loop with bounded multi-step reasoning
+- you need built-in middleware for limits, retries, summarization, fallback, or human-in-the-loop
+- you need structured final output (`response_format=PydanticModel`) or progress streaming
+
+**Don't use this for:**
+- single prompt-to-response calls with no tools → `./litellm.md`
+- multi-graph topology, `Send` fan-out, reducers, raw `StateGraph` → `./langgraph.md`
+- tracing/observability wiring → `./langfuse.md`
 
 How to use LangChain agents in an async FastAPI backend. Use this guide for
 tool-using workflows, bounded multi-step reasoning, structured agent responses,
@@ -8,9 +22,11 @@ and streamed progress. For simple prompt-to-response calls with no tools, prefer
 the direct LiteLLM client in [`./litellm.md`](./litellm.md).
 
 This guide is async-first. The route calls a service/use-case, the service calls
-an agent gateway, and `dependency-injector` assembles the agent from passive
-configuration, a `langchain_litellm.ChatLiteLLM` model, tool gateways,
+an agent runner, and `dependency-injector` assembles the agent from passive
+configuration, a `langchain_litellm.ChatLiteLLM` model, tool adapters,
 middleware, and tracing callbacks.
+
+## Table of Contents
 
 | Phase | Section |
 |-------|---------|
@@ -25,7 +41,7 @@ middleware, and tracing callbacks.
 | Need | Default |
 |------|---------|
 | Agent constructor | `langchain.agents.create_agent(...)` |
-| Wiring | `dependency-injector` composes settings, clients, tools, middleware, factory, gateway |
+| Wiring | `dependency-injector` composes settings, clients, tools, middleware, factory, agent runner |
 | Model | `langchain_litellm.ChatLiteLLM`; direct LLM calls stay in [`./litellm.md`](./litellm.md) |
 | Runtime | LangGraph compiled graph behind the agent |
 | Async call | `await agent.ainvoke({"messages": [...]}, config=...)` |
@@ -33,7 +49,7 @@ middleware, and tracing callbacks.
 | Tools | Small async functions decorated with `@tool` |
 | Structured response | Pass a Pydantic model as `response_format` and read `state["structured_response"]` |
 | Middleware | Hooks into the LangGraph runtime: `before_agent`, `before_model`, `wrap_model_call`, `after_model`, `wrap_tool_call`, `after_agent`. LangChain ships built-ins for budgets, summarization, retries, fallback, HITL, PII |
-| API test boundary | Mock the agent gateway, not LangChain internals |
+| API test boundary | Mock the agent runner, not LangChain internals |
 
 ## When To Use
 
@@ -66,6 +82,8 @@ by feature need.
 Observability is unified through Langfuse, attached to each path separately via
 its callback hook. See [`./langfuse.md`](./langfuse.md).
 
+See also: [Langfuse LangChain integration](https://langfuse.com/integrations/frameworks/langchain).
+
 **Per-client `BaseChatModel` rule.** Each LLM client implementation needs a
 corresponding `BaseChatModel` for LangChain to plug into. For `LiteLLMClient`,
 that is `langchain_litellm.ChatLiteLLM` (shipped — no custom code). For a
@@ -92,83 +110,24 @@ chain.
 ## Wire Up
 
 Keep LangChain out of route handlers. Build the agent once through the
-container, inject the gateway into services, and call the gateway from use-cases.
+container, inject the agent runner into services, and call the agent runner from use-cases.
 
 ```text
 HTTP request
   -> FastAPI route/controller
   -> service/use-case
-  -> AgentGateway
+  -> AgentRunner
   -> LangChain create_agent / LangGraph runtime
-  -> tools / outbound gateways
+  -> tools / outbound adapters
 ```
 
-The container shape follows [`./dependency-injector.md`](./dependency-injector.md).
-The important ownership rule: settings are data, `AgentFactory` is the actor
-that constructs the agent, and the container decides what gets injected.
+The important ownership rule: settings are data, `AgentFactory` is the actor that constructs the agent, and the container decides what gets injected.
 
-```python
-# containers.py
-from dependency_injector import containers, providers
-
-from langchain_litellm import ChatLiteLLM
-
-from .agents import AgentFactory, AgentGateway, AgentSettings, build_middlewares
-from .litellm_client import LiteLLMClient, LiteLLMSettings
-from .services import AskService
-from .search import SearchGateway
-
-
-class Container(containers.DeclarativeContainer):
-    config = providers.Configuration(yaml_files=["configs/app.yaml"])
-
-    llm_settings = providers.Factory(
-        LiteLLMSettings,
-        model=config.llm.model,
-        temperature=config.llm.temperature.as_float(),
-        max_tokens=config.llm.max_tokens.as_int(),
-        timeout_seconds=config.llm.timeout_seconds.as_int(),
-        provider_kwargs=config.llm.provider_kwargs,
-    )
-    litellm_client = providers.Singleton(LiteLLMClient, settings=llm_settings)
-    agent_model = providers.Singleton(
-        ChatLiteLLM,
-        model=config.llm.model,
-        temperature=config.llm.temperature.as_float(),
-        max_tokens=config.llm.max_tokens.as_int(),
-        request_timeout=config.llm.timeout_seconds.as_int(),
-    )
-
-    search_gateway = providers.Singleton(
-        SearchGateway,
-        base_url=config.search.base_url,
-    )
-    agent_settings = providers.Factory(
-        AgentSettings,
-        system_prompt=config.agent.system_prompt,
-        max_iterations=config.agent.max_iterations.as_int(),
-        max_tool_calls=config.agent.max_tool_calls.as_int(),
-    )
-    agent_middlewares = providers.Callable(
-        build_middlewares,
-        settings=agent_settings,
-    )
-    agent_factory = providers.Factory(
-        AgentFactory,
-        model=agent_model,
-        search_gateway=search_gateway,
-        settings=agent_settings,
-        middlewares=agent_middlewares,
-    )
-    agent = providers.Singleton(lambda factory: factory.build(), agent_factory)
-    agent_gateway = providers.Factory(AgentGateway, agent=agent)
-
-    ask_service = providers.Factory(AskService, agent_gateway=agent_gateway)
-```
+Container wiring (the multi-provider agent chain — model, adapters, agent factory, top-level service) lives in [./dependency-injector.md#langchain](./dependency-injector.md#langchain).
 
 ## Core Pattern
 
-The factory owns agent construction. The gateway owns invocation. Configuration
+The factory owns agent construction. The agent runner owns invocation. Configuration
 does not construct anything; it is injected into the factory.
 
 ```python
@@ -187,7 +146,7 @@ from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 
-class SearchGateway(Protocol):
+class WebSearcher(Protocol):
     async def search(self, query: str) -> list[str]: ...
 
 
@@ -209,43 +168,41 @@ def build_middlewares(settings: AgentSettings) -> list[AgentMiddleware]:
     ]
 
 
-def build_search_tool(search_gateway: SearchGateway):
+def build_search_tool(web_searcher: WebSearcher):
     @tool
     async def search_docs(query: str) -> str:
         """Search approved source documents for relevant snippets."""
-        hits = await search_gateway.search(query)
+        hits = await web_searcher.search(query)
         return "\n".join(hits)
 
     return search_docs
+```
 
+**AgentFactory** — **Purpose**: constructs and returns a compiled LangChain agent with model, tools, and middleware wired in. **Responsibilities**: own model selection; own tool registration; own middleware ordering; produce a Singleton-compatible compiled agent. **Must not**: be invoked per-request (agent compilation is expensive); own runtime business logic.
 
+```python
 class AgentFactory:
     def __init__(
         self,
         *,
         model: BaseChatModel,
-        search_gateway: SearchGateway,
+        web_searcher: WebSearcher,
         settings: AgentSettings,
         middlewares: Sequence[AgentMiddleware],
     ) -> None:
         self._model = model
-        self._search_gateway = search_gateway
+        self._web_searcher = web_searcher
         self._settings = settings
         self._middlewares = list(middlewares)
 
-    def build(self):
-        return create_agent(
-            name="ask_agent",
-            model=self._model,
-            tools=[build_search_tool(self._search_gateway)],
-            system_prompt=self._settings.system_prompt,
-            response_format=AgentAnswer,
-            middleware=self._middlewares,
-        )
+    def build(self) -> CompiledAgent: ...
+```
 
+**AgentRunner** — **Purpose**: request-scoped facade in front of a shared compiled agent; turns service-layer questions into agent invocations. **Responsibilities**: format service input into agent input; call `ainvoke`; map agent output into the service-layer return type; raise on agent errors. **Must not**: compile its own agent (the compiled agent is injected); store per-call state across requests.
 
-class AgentGateway:
-    def __init__(self, agent) -> None:
+```python
+class AgentRunner:
+    def __init__(self, agent: CompiledAgent) -> None:
         self._agent = agent
 
     async def answer(
@@ -254,16 +211,7 @@ class AgentGateway:
         request_id: str,
         user_id: str,
         question: str,
-    ) -> AgentAnswer:
-        state = await self._agent.ainvoke(
-            {"messages": [{"role": "user", "content": question}]},
-            config={
-                "configurable": {"thread_id": request_id},
-                "run_id": request_id,
-                "metadata": {"user_id": user_id},
-            },
-        )
-        return state["structured_response"]
+    ) -> AgentAnswer: ...
 ```
 
 The agent path uses `langchain_litellm.ChatLiteLLM` directly — no custom adapter.
@@ -275,11 +223,13 @@ shared with the other. Langfuse hooks attach to each separately — see
 
 Do not compile the agent inside the request handler. Construction binds the
 model, tools, middleware, and response schema. Reusing the compiled runtime
-keeps request latency predictable and makes tests patch one gateway boundary.
+keeps request latency predictable and makes tests patch one adapter boundary.
+
+See also: [LangChain `create_agent` docs](https://docs.langchain.com/oss/python/langchain/agents).
 
 ## Tools
 
-Tools should be narrow adapters over existing gateways, repositories, or
+Tools should be narrow adapters over existing adapters, repositories, or
 services. They are not a second business layer.
 
 | Rule | Why |
@@ -294,6 +244,96 @@ For user-specific tool availability, use a `wrap_model_call` middleware to
 filter tools per request — see [Middleware](#middleware) for the canonical
 pattern. Don't construct a new agent for every request.
 
+### Library surface
+
+`langchain_core.tools` provides the primitives. Reach for the decorator first; subclass only when you need state or non-trivial init.
+
+| Primitive | Use |
+|-----------|-----|
+| `@tool` | Decorate an async function. Name, args schema, and description are derived from the signature + docstring. The default and almost-always-right choice. |
+| `BaseTool` | Subclass when the tool holds state (a shared HTTP client, a pre-loaded model) or needs custom `_arun`. Define `name`, `description`, `args_schema`, and `async def _arun(...)`. |
+| `StructuredTool` | Build a tool from a callable + an explicit `args_schema` without subclassing. Useful when the schema doesn't match the function signature one-for-one. |
+| `ToolException` | Raise inside a tool to signal a clean, model-visible failure. The runtime catches it and feeds the message back to the model instead of bubbling the traceback. |
+| `InjectedToolArg` / `InjectedState` | Annotate parameters the framework injects from runtime context rather than from LLM-generated args. |
+
+`create_agent(tools=[...])` accepts any of these uniformly. The agent's model sees only the JSON-schema view; the runtime handles dispatch.
+
+See also: [LangChain tools concept](https://python.langchain.com/docs/concepts/tools/), [LangGraph tool-calling how-to](https://langchain-ai.github.io/langgraph/how-tos/tool-calling/), [LangGraph many-tools how-to](https://langchain-ai.github.io/langgraph/how-tos/many-tools/), [LangGraph agentic concepts](https://langchain-ai.github.io/langgraph/concepts/agentic_concepts/), [LangGraph types reference](https://langchain-ai.github.io/langgraph/reference/types/).
+
+### Example
+
+A typical `@tool`-decorated coroutine wraps an existing async adapter:
+
+```python
+from langchain_core.tools import tool
+
+from .adapters import WebSearcher
+
+
+def build_web_search_tool(web_searcher: WebSearcher):
+    @tool
+    async def web_search(query: str, limit: int = 5) -> str:
+        """Search the web for recent pages matching the query.
+
+        Args:
+            query: The user's search phrase.
+            limit: Maximum number of results to return.
+        """
+        results = await web_searcher.search(query=query, limit=limit)
+        return "\n".join(f"- {r.title} ({r.url})" for r in results)
+
+    return web_search
+```
+
+The closure-over-adapter pattern keeps the tool a narrow adapter (rule 1) and threads request-bound dependencies in via the factory. Parallel tool calls are dispatched internally by `create_agent` — see [./langgraph.md#reducers](./langgraph.md#reducers) for the underlying `Send` primitive.
+
+See also: [LangChain custom tools how-to](https://python.langchain.com/docs/how_to/custom_tools/), [HTTPX async client](https://www.python-httpx.org/async_client/) (for tools that hit external APIs).
+
+### Async Lifecycle
+
+Tools used inside an async graph must be async. A sync tool blocks the event loop and stalls every concurrent in-flight tool. Three rules:
+
+- **Bound every external call with a hard timeout.** Use `asyncio.timeout(seconds)` (Python 3.11+) inside the tool body, not at the caller. Cooperative cancellation only works if `_arun` awaits regularly — a tight CPU loop ignores `task.cancel()`.
+- **Push blocking work to a worker thread.** If the tool must call a sync SDK (a sync vector store, a CPU-heavy chunker), wrap that call in `await asyncio.to_thread(blocking_fn, ...)`. Don't introduce a sync tool.
+- **Let `CancelledError` propagate.** Don't `except CancelledError: pass` — it strands the cleanup that LangGraph wires up on client disconnect.
+
+```python
+import asyncio
+
+from langchain_core.tools import tool
+
+
+@tool
+async def fetch_page(url: str) -> str:
+    """Fetch a single URL and return its text."""
+    async with asyncio.timeout(10):
+        return await http_client.get_text(url)
+```
+
+See also: [`asyncio.timeout`](https://docs.python.org/3/library/asyncio-task.html#asyncio.timeout), [`asyncio.Task`](https://docs.python.org/3/library/asyncio-task.html).
+
+### Tool I/O
+
+LangChain validates tool args against a Pydantic schema derived from the function signature + type hints. For richer schemas — field descriptions the model can read, validators, custom types — pass an explicit `args_schema`:
+
+```python
+from langchain_core.tools import tool
+from pydantic import BaseModel, Field
+
+
+class SearchInput(BaseModel):
+    query: str = Field(description="What to search for.")
+    limit: int = Field(default=5, ge=1, le=20, description="Max results to return.")
+
+
+@tool(args_schema=SearchInput)
+async def web_search(query: str, limit: int = 5) -> str: ...
+```
+
+Outputs go straight into the model's context as whatever the function returns (str, dict, list — `to_string` is best-effort). Return compact, parseable shapes; the rules table above applies.
+
+See also: [Pydantic models](https://docs.pydantic.dev/latest/concepts/models/).
+
 ## Middleware
 
 Middleware is the user-facing extension surface over the LangGraph runtime that
@@ -302,6 +342,8 @@ the agent runtime onto LangGraph and exposed middleware as the way to hook
 into it — you don't drop into raw graph code for things like history trimming,
 retries, budgets, or human-in-the-loop. Pass `middleware=[...]` to
 `create_agent` and the runtime composes them per the diagram below.
+
+See also: [LangChain middleware overview](https://docs.langchain.com/oss/python/langchain/middleware/overview).
 
 ### Hook surface
 
@@ -373,6 +415,8 @@ subclassing `AgentMiddleware`.
 | `ShellToolMiddleware` | Tooling | Persistent shell sessions for shell tools |
 | `FilesystemFileSearchMiddleware` | Tooling | Glob/grep search exposed to the agent |
 
+See also: [LangChain built-in middleware](https://docs.langchain.com/oss/python/langchain/middleware/built-in).
+
 ### Patterns
 
 **Decorator (single hook).** For a one-shot hook over the model call — for
@@ -425,6 +469,8 @@ class ProgressEmitter(AgentMiddleware):
 
 Both pass into `create_agent(middleware=[...])`; the runtime composes them per
 the diagram above.
+
+See also: [LangChain custom middleware](https://docs.langchain.com/oss/python/langchain/middleware/custom), [`AgentMiddleware` reference](https://reference.langchain.com/python/langchain/agents/middleware/types/AgentMiddleware).
 
 ### Composition order
 
@@ -500,16 +546,18 @@ Known sharp edges: combining `tool_choice="none"` with fallbacks can drop JSON
 output, and a few `azure_ai`/Mistral SDK versions reject `json_schema` until
 LiteLLM's adapter normalizes it.
 
+See also: [LangChain structured-output docs](https://docs.langchain.com/oss/python/langchain/structured-output).
+
 ## Streaming
 
 Use `astream()` when the frontend needs progress or tokens. Keep the streaming
-translation in the gateway so the route only returns an async iterator.
+translation in the agent runner so the route only returns an async iterator.
 
 ```python
 from collections.abc import AsyncIterator
 
 
-class AgentGateway:
+class AgentRunner:
     ...
 
     async def stream_answer(
@@ -540,10 +588,12 @@ Requires `langgraph >= 1.1`.
 Use `stream_mode="messages"` for token chunks, `stream_mode="updates"` for node
 state updates, and `stream_mode="custom"` for explicit progress events.
 
+See also: [LangGraph streaming docs](https://docs.langchain.com/oss/python/langgraph/streaming), and [./langgraph.md#streaming](./langgraph.md#streaming) for the producer-side `stream_writer` primitive.
+
 ## FastAPI Example
 
-Route -> service -> gateway. The route owns HTTP shape, the service owns
-orchestration, and the gateway owns LangChain.
+Route -> service -> agent runner. The route owns HTTP shape, the service owns
+orchestration, and the agent runner owns LangChain.
 
 ```python
 # schemas.py
@@ -563,13 +613,13 @@ class AskResponseDTO(BaseModel):
 # services.py
 from collections.abc import AsyncIterator
 
-from .agents import AgentGateway
+from .agents import AgentRunner
 from .schemas import AskResponseDTO
 
 
 class AskService:
-    def __init__(self, agent_gateway: AgentGateway) -> None:
-        self._agent_gateway = agent_gateway
+    def __init__(self, agent_runner: AgentRunner) -> None:
+        self._agent_runner = agent_runner
 
     async def ask(
         self,
@@ -578,7 +628,7 @@ class AskService:
         user_id: str,
         question: str,
     ) -> AskResponseDTO:
-        answer = await self._agent_gateway.answer(
+        answer = await self._agent_runner.answer(
             request_id=request_id,
             user_id=user_id,
             question=question,
@@ -594,7 +644,7 @@ class AskService:
         request_id: str,
         question: str,
     ) -> AsyncIterator[str]:
-        async for token in self._agent_gateway.stream_answer(
+        async for token in self._agent_runner.stream_answer(
             request_id=request_id,
             question=question,
         ):
@@ -655,7 +705,7 @@ async def ask_stream(
 
 ## Testing
 
-API tests follow [`./python-tests.md`](./python-tests.md): replace the gateway
+API tests follow [`./python-tests.md`](./python-tests.md): replace the adapter
 boundary, then call the real route and service/use-case.
 
 ```python
@@ -667,14 +717,14 @@ from app.containers import Container
 from app.main import create_app
 
 
-class FakeAgentGateway:
+class MockAgentRunner:
     async def answer(self, *, request_id: str, user_id: str, question: str):
         return AgentAnswer(answer=f"Answered: {question}", citations=["doc-1"])
 
 
 async def test_ask_returns_agent_answer() -> None:
     container = Container()
-    container.agent_gateway.override(providers.Object(FakeAgentGateway()))
+    container.agent_runner.override(providers.Object(MockAgentRunner()))
     app = create_app(container=container)
     transport = ASGITransport(app=app)
 
@@ -687,10 +737,10 @@ async def test_ask_returns_agent_answer() -> None:
         "citations": ["doc-1"],
     }
 
-    container.agent_gateway.reset_override()
+    container.agent_runner.reset_override()
 ```
 
-Service tests can fake `AgentGateway`. Gateway tests should use a fake model or
+Service tests can mock `AgentRunner`. Agent runner tests should use a mock model or
 LangChain test double, not a real provider. Keep real LLM calls in a small,
 manually-triggered integration suite with explicit API-key requirements.
 
@@ -707,7 +757,7 @@ manually-triggered integration suite with explicit API-key requirements.
 - Keep prompt, model, temperature, and tool budgets in passive configuration.
 - Use DI factories, not config objects, to build agents.
 - Record token usage and provider/model names when the model response exposes them.
-- Mock the agent gateway in API tests and disable real tracing callbacks in tests.
+- Mock the agent runner in API tests and disable real tracing callbacks in tests.
 
 ## Pitfalls
 
@@ -723,16 +773,10 @@ manually-triggered integration suite with explicit API-key requirements.
 | Tool output too large | Return compact snippets, IDs, and summaries |
 | Parsing final prose | Use `response_format` and validate service-level invariants |
 | Assuming `response_format` works on every model | Coverage depends on tool-call support (or native structured output). Check `litellm.supports_response_schema(model)` and confirm the model can be tool-called |
-| Testing through real providers | Fake the gateway in API tests |
-| Leaking project wrappers into examples | Keep public guides on FastAPI, LangChain, and gateway interfaces |
-
-## References
-
-- https://docs.langchain.com/oss/python/langchain/agents
-- https://docs.langchain.com/oss/python/langchain/middleware/overview
-- https://docs.langchain.com/oss/python/langchain/middleware/custom
-- https://docs.langchain.com/oss/python/langchain/middleware/built-in
-- https://reference.langchain.com/python/langchain/agents/middleware/types/AgentMiddleware
-- https://docs.langchain.com/oss/python/langchain/structured-output
-- https://docs.langchain.com/oss/python/langgraph/streaming
-- https://langfuse.com/integrations/frameworks/langchain
+| Testing through real providers | Mock the agent runner in API tests |
+| Leaking project wrappers into examples | Keep public guides on FastAPI, LangChain, and adapter interfaces |
+| Blocking calls inside an async tool | Wrap in `await asyncio.to_thread(...)` or use an async SDK — sync calls stall every concurrent tool |
+| Tool output too large | Cap result counts and content length at the tool boundary, not in a downstream node — the output feeds back into model context |
+| No per-tool timeout | Use `async with asyncio.timeout(seconds):` inside the tool — a hanging external call ties up an agent iteration indefinitely |
+| LLM-emitted tool args bypassing schema validation | Pydantic validation runs on the dispatched args — but only if `args_schema` (or an inferable function signature) is set. A loose `**kwargs` tool signature skips validation entirely |
+| Swallowing `CancelledError` in a tool | Let it propagate so LangGraph can cancel the in-flight node on client disconnect or upstream timeout |

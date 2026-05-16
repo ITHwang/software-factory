@@ -1,6 +1,31 @@
 # Python Toolchain Setup
 
-> Last updated: 2026-05-09
+> Last updated: 2026-05-14
+
+## TL;DR
+
+How to wire ruff (lint + format), mypy (typecheck), pre-commit (git hooks), and GitHub Actions (CI) into a uv project. Pyright (default) or Pyrefly (alternative when pyright IDE perf is a bottleneck) are editor-only and intentionally outside this stack.
+
+**Use this when:**
+- adding linting/formatting/typecheck/CI to a new Python project
+- tightening an existing project's quality bar
+- standardizing tool configs across the repo
+
+**Don't use this for:**
+- installing the Python runtime / setting up `uv` itself → `./py-setup-environments.md`
+- language-level conventions (version, framework choices) → `./README.md`
+- API test patterns → `./python-tests.md`
+
+## Table of Contents
+
+| Section |
+|---------|
+| [Setup](#setup) |
+| [Stack At A Glance](#stack-at-a-glance) |
+| [Project Structure](#project-structure) |
+| [Tool Config (pyproject.toml)](#tool-config-pyprojecttoml) |
+| [Tools](#tools) |
+| [Best Practices](#best-practices) |
 
 ## Setup
 
@@ -22,13 +47,14 @@ pre-commit install
 pre-commit run --all-files
 ```
 
-`pyright` is intentionally **not** in this dependency list — it's editor-only. See [Pyright (Editor Only)](#pyright-editor-only).
+`pyright` is intentionally **not** in this dependency list — it's editor-only. See [Pyright (Editor Only)](#pyright-editor-only). When pyright IDE responsiveness is a bottleneck, `pyrefly` is the editor-only alternative — see [Pyrefly (Editor Alternative)](#pyrefly-editor-alternative).
 
 ## Stack At A Glance
 
 | Tool            | Role                                 | When to run                  |
 |-----------------|--------------------------------------|------------------------------|
 | `pyright`       | Editor type-check, hover, go-to-def  | In editor                    |
+| `pyrefly`       | Editor type-check (alt. when pyright is slow) | In editor             |
 | `ruff`          | Lint, format, and import sorting     | In pre-commit                |
 | `mypy`          | Static type checking (canonical)     | In pre-commit                |
 | `pre-commit`    | Hook orchestrator                    | Local, CI                    |
@@ -87,6 +113,8 @@ exclude = [
 ]
 ```
 
+Pyrefly users can opt-in per-developer by running `pyrefly init`, which reads the existing `[tool.pyright]` + `[tool.mypy]` blocks and writes a `[tool.pyrefly]` block alongside. The pyright block above stays canonical; the pyrefly block is generated, not maintained by hand.
+
 ## Tools
 
 ### Ruff
@@ -130,6 +158,30 @@ Rules:
 
 - **Never add pyright to CI or pre-commit.** It is an editor-side aid, not a gate.
 - If a pyright squiggle disagrees with mypy and mypy is silent, suppress the pyright warning with `# pyright: ignore[reportX]`. Do not change code to please pyright at the cost of mypy clarity.
+
+### Pyrefly (Editor Alternative)
+
+[Pyrefly](https://pyrefly.org/) is Meta's Rust-based type checker (1.0 shipped 2026-05-12; default at Instagram; adopted by PyTorch, JAX, NumPy, Pandas). Keep pyright as the editor default. Reach for Pyrefly only when pyright IDE responsiveness becomes a bottleneck on this codebase — slow rechecks on a large code tree, high RAM, or perceptible save-to-squiggle lag.
+
+Performance signal: pyrefly checks PyTorch in ~2.4 s vs pyright's ~35.2 s; IDE p99 rechecks drop from minutes to seconds on Meta-scale code.
+
+Trade-offs to know before switching:
+
+- **Typing-spec conformance is ~90 %** vs pyright's higher score — a small set of spec edge cases pyright would flag may slip through.
+- **Pylance + Pyrefly integration via the new Type Server Protocol is still early-preview at 1.0** (VS Code Insiders only). Adopting Pyrefly in VS Code today means installing the Pyrefly extension and disabling Pylance's typecheck (or removing Pylance), giving up the rest of Pylance's bundled features.
+
+Install — per-developer, dev-only, never in the lockfile that ships to CI:
+
+```bash
+uv add --dev pyrefly        # editor-side typechecker
+pyrefly init                # reads existing [tool.pyright] + [tool.mypy]
+```
+
+Rules:
+
+- **Never add Pyrefly to CI or pre-commit.** Same policy as pyright. Mypy is the canonical CI gate.
+- When swapping to Pyrefly in VS Code, install the Pyrefly extension and disable Pylance's typecheck so only one checker emits diagnostics — otherwise you get duplicate squiggles from two checkers disagreeing on conformance edge cases.
+- If pyrefly disagrees with mypy and mypy is silent, prefer mypy's verdict — same rule as for pyright. Do not change code to please the editor checker at the cost of mypy clarity.
 
 ### Pre-commit
 
