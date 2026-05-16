@@ -1,12 +1,13 @@
 # Python Backend Architecture (Ports & Adapters)
 
-> Last updated: 2026-05-14
+> Last updated: 2026-05-16
 
 ## TL;DR
 
 Lightweight ports-and-adapters. Three layers: **entities**, **services + ports**, **adapters + clients**, fronted by **apis**. Ports are named after the capability the application needs (`TextSummarizer`, not `LLMGateway`). Adapters are named `[Implementation][Capability]` (`OpenAITextSummarizer`). Routes are infrastructure; service code never imports from `fastapi`.
 
 **Use this when:**
+- laying out a new project's `app/` skeleton: top-level folders, global wiring files, entry point
 - starting a new domain package and laying out `apis/services/ports/entities/adapters`
 - deciding whether a new outbound dependency deserves a port or should call a client directly
 - naming a new port or adapter
@@ -24,6 +25,7 @@ Lightweight ports-and-adapters. Three layers: **entities**, **services + ports**
 | Section |
 |---------|
 | [Quick Reference](#quick-reference) |
+| [Project Skeleton](#project-skeleton) |
 | [Layer Layout](#layer-layout) |
 | [Layer Responsibilities](#layer-responsibilities) |
 | [Naming: Ports](#naming-ports) |
@@ -42,28 +44,67 @@ Lightweight ports-and-adapters. Three layers: **entities**, **services + ports**
 | `ports/` | `Protocol`-based contracts owned by the business layer. |
 | `entities/` | Domain objects and DTOs, independent of HTTP, DB, or SDK shapes. |
 | `adapters/` | Infrastructure implementations of ports (`PostgresUserRepository`, `OpenAITextSummarizer`). |
-| `clients/` | Low-level infrastructure clients (DB session wrappers, SDK wrappers, HTTP clients). Shared, not domain-scoped. |
+| `common/` | Shared, domain-agnostic infrastructure: low-level SDK/DB clients, shared error types, FastAPI middleware/dependencies. |
+
+## Project Skeleton
+
+What sits above a domain: the entry point, the package, and the global wiring files that compose domains into a running FastAPI app.
+
+```text
+<project-root>/
+├── run.py                   # entry point: env validation + uvicorn launch
+├── pyproject.toml
+├── tests/
+└── app/
+    ├── __init__.py
+    ├── common/              # shared, domain-agnostic infra
+    │   ├── clients/         # RDBClient, LiteLLMClient, S3Client, ...
+    │   ├── errors/          # CustomError hierarchy + global exception handlers
+    │   └── fastapi/         # middleware, request-scoped dependencies
+    ├── config/              # env + yaml settings loading
+    ├── domains/
+    │   ├── users/
+    │   ├── documents/
+    │   └── chats/
+    ├── utils/               # pure-function helpers
+    ├── containers.py        # global DI container (composes domain containers, wires APIs)
+    ├── routers.py           # aggregates domain routers under prefixes + tags
+    └── server.py            # FastAPI app factory, lifespan, exception-handler registration
+```
+
+- **`run.py`** — process entry. Loads `.env`, validates `API_ENV`, calls `uvicorn.run`. Typically a `click` CLI exposing `--port` / `--ssl-keyfile` options.
+- **`app/common/`** — shared infra. Holds low-level `clients/`, the `CustomError` hierarchy + global handlers, and FastAPI middleware/dependencies. No business logic. Never imports from `app/domains/`.
+- **`app/config/`** — settings loading (env vars + yaml). Other layers receive config via the DI container; they do not import `config` directly.
+- **`app/domains/`** — one folder per business domain. Each follows the [layer layout](#layer-layout) below.
+- **`app/utils/`** — pure-function helpers. No I/O, no DI, no domain types.
+- **`app/containers.py`** — global DI container. Loads config, composes per-domain sub-containers, declares wiring for the API packages.
+- **`app/routers.py`** — aggregates each domain's router under its prefix (e.g., `/api/v1`) and tag. Single import point for `server.py`.
+- **`app/server.py`** — FastAPI app factory. Registers middleware, mounts `app_router`, wires global exception handlers, owns the `lifespan` (startup/shutdown of long-lived resources like DB pools or MCP sessions).
 
 ## Layer Layout
 
-Domain-scoped folders. Each business domain (`users`, `summaries`, `payments`, ...) gets its own slice of the five inner layers. `clients/` is shared because session wrappers and SDK clients aren't owned by any one domain.
+Domain-scoped folders under `app/domains/`. Each business domain (`users`, `documents`, `chats`, `payments`, ...) gets its own slice of the five inner layers.
 
 ```text
-app/
+app/domains/
 ├── users/
 │   ├── apis/         # routers, request/response schemas
 │   ├── services/     # orchestration, txn boundaries
 │   ├── ports/        # Protocol contracts (UserRepository, ...)
 │   ├── entities/     # User, UserDTO, value objects
 │   └── adapters/     # PostgresUserRepository, SESEmailSender
-├── summaries/
+├── documents/
 │   ├── apis/
 │   ├── services/
-│   ├── ports/        # TextSummarizer, ...
+│   ├── ports/        # DocumentRepository, DocumentExtractor, ...
 │   ├── entities/
-│   └── adapters/     # OpenAITextSummarizer, ClaudeTextSummarizer
-├── clients/          # RDBClient, LiteLLMClient, S3Client, ...
-└── containers.py     # DI wiring
+│   └── adapters/     # S3DocumentRepository, PdfDocumentExtractor
+└── chats/
+    ├── apis/
+    ├── services/
+    ├── ports/        # ChatCompleter, ChatHistoryRepository, ...
+    ├── entities/
+    └── adapters/     # OpenAIChatCompleter, PostgresChatHistoryRepository
 ```
 
 ## Layer Responsibilities
@@ -126,12 +167,12 @@ app/
 
 **Constraints**:
 - Must not encode business contracts — a client is `LiteLLMClient`, not `TextSummarizer`. Domain intent belongs in ports.
-- Must not live inside a domain folder. Clients are shared infrastructure under `app/clients/`.
-- Must not import from any domain package (`users/`, `summaries/`, ...). The dependency direction is domain -> client, never the reverse.
+- Must not live inside a domain folder. Clients are shared infrastructure under `app/common/clients/`.
+- Must not import from any domain package (`users/`, `documents/`, ...). The dependency direction is domain -> client, never the reverse.
 
 - Lightweight wrappers around infrastructure: DB session executors (`RDBClient`), SDK wrappers (`LiteLLMClient`), HTTP clients.
 - Not tied to a business contract. Services may use a client directly when no port abstraction is warranted (see [When To Use Ports](#when-to-use-ports)).
-- Shared across domains. Live under `app/clients/`, not inside a domain folder.
+- Shared across domains. Live under `app/common/clients/`, not inside a domain folder.
 
 ## Naming: Ports
 
@@ -181,7 +222,7 @@ Two criteria. **Both must hold** — if neither does, skip the port and have the
 1. **The business layer should own the contract.** Business requirements evolve first; infrastructure follows. If the shape of the call would change because the business asked for a new capability (not because we swapped vendors), it belongs behind a port.
 2. **The external dependency should be replaceable.** PostgreSQL -> DocumentDB, SES -> SendGrid, OpenAI -> Claude. If the dependency is effectively fixed for the life of the project (the standard library, a config file format, a logger), a port is overhead.
 
-Lightweight infra clients (DB session wrappers, SDK wrappers, HTTP clients) live in `app/clients/`. Unlike adapters, clients aren't tied to business contracts and may be used directly by services when no port abstraction is warranted. The split: ports express what the business needs; clients express what infrastructure offers.
+Lightweight infra clients (DB session wrappers, SDK wrappers, HTTP clients) live in `app/common/clients/`. Unlike adapters, clients aren't tied to business contracts and may be used directly by services when no port abstraction is warranted. The split: ports express what the business needs; clients express what infrastructure offers.
 
 ## Services And FastAPI
 
@@ -213,6 +254,8 @@ Both exceptions exist because the underlying state is **strict request-scoped**.
 - [./dependency-injector.md](./dependency-injector.md) — DI wiring patterns.
 - [./sqlalchemy.md](./sqlalchemy.md) — persistence layer in this style (`RDBClient`, `UserRepository`).
 - [./langfuse.md](./langfuse.md) — LLM capability ports with Langfuse-backed prompt templates.
+- [./multi-project-management-with-uv.md](./multi-project-management-with-uv.md) — multi-project repo layout with uv path dependencies / workspaces.
+- [./how-to-run-mcp-servers.md](./how-to-run-mcp-servers.md) — three modes for running MCP servers from a Python app.
 - [./README.md](./README.md) — Python folder index.
 - [./py-errors.md](./py-errors.md) — `CustomError` discipline and exception-handling convention.
 

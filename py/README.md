@@ -11,6 +11,7 @@ Python conventions and library patterns. Start at the topic group below; each do
 **Setup & Tooling**
 - [`./py-setup-environments.md`](./py-setup-environments.md) — uv, Python version, `.env` loading.
 - [`./py-setup-toolchains.md`](./py-setup-toolchains.md) — ruff, mypy, CI baseline.
+- [`./multi-project-management-with-uv.md`](./multi-project-management-with-uv.md) — multi-project repo with uv (path dependencies / workspaces).
 
 **Architecture & Conventions**
 - [`./py-abstractions.md`](./py-abstractions.md) — Protocol vs ABC vs mixin.
@@ -38,6 +39,7 @@ Python conventions and library patterns. Start at the topic group below; each do
 - [`./py-web-crawling.md`](./py-web-crawling.md) — crawling patterns.
 
 **LLM & AI**
+- [`./how-to-run-mcp-servers.md`](./how-to-run-mcp-servers.md) — running MCP servers in-memory, subprocess, or over HTTP.
 - [`./langchain.md`](./langchain.md)
 - [`./langfuse.md`](./langfuse.md) — LLM ports with prompt templates.
 - [`./langgraph.md`](./langgraph.md)
