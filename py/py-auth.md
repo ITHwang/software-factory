@@ -508,7 +508,7 @@ CSRF token: necessary if you're cookie-based with cross-site scenarios; you can 
 ## FastAPI Wire-Up
 
 - **Auth boundary:** routes use `Depends(get_current_user)`; routes **never** decode JWT inline. This is one of the two documented FastAPI-`Depends` exceptions to the DI container rule (see [`./py-backend-architecture.md#services-and-fastapi`](./py-backend-architecture.md#services-and-fastapi)).
-- **Domain error type:** `AuthenticationError` (a `CustomError` subclass — see [`./py-guidelines.md`](./py-guidelines.md) Exception Handling). Verifiers raise it; the global exception handler maps it to 401.
+- **Domain error type:** `AuthenticationError` (a `CustomError` subclass — see [`./py-errors.md`](./py-errors.md)). Verifiers raise it; the global exception handler maps it to 401.
 - **Port naming:** the capability port is `JWTVerifier` (provider-agnostic). Concrete adapters are `CognitoJWTVerifier`, `GoogleOIDCVerifier`, `Auth0JWTVerifier`. The test double is `MockJWTVerifier`.
 - **`OAuth2PasswordBearer` clarification:** despite the name, this class is *just* an `Authorization: Bearer` header parser with OpenAPI metadata attached. It is NOT a directive to implement the OAuth 2.0 Password Grant (ROPC, removed in OAuth 2.1). For most services prefer `HTTPBearer` — smaller, clearer name.
 
@@ -699,7 +699,7 @@ class AuthenticationError(Exception):
     """Raised by any JWTVerifier adapter when verification fails.
 
     Carried up to the global FastAPI exception handler, which maps it to 401.
-    Subclass of CustomError in real codebases — see py-guidelines.md.
+    Subclass of CustomError in real codebases — see py-errors.md.
     """
 
 

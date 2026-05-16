@@ -343,7 +343,7 @@ class FileExtractor(Protocol):
     ) -> list[Element]: ...
 ```
 
-`ExtractionOptions` is an internal trust-boundary DTO (frozen `dataclass`, not a `BaseModel`). `content_type` is a hint passed to the adapter, not a route-level dispatch key — each per-library adapter validates the content type it was wired for and raises `UnsupportedFileType` outside its domain. OCR adapters validate `options.languages` and raise `ExtractionOptionsRequired` (a `CustomError` — see [`./py-guidelines.md`](./py-guidelines.md#exception-handling)) when missing. See [Pitfalls](#pitfalls).
+`ExtractionOptions` is an internal trust-boundary DTO (frozen `dataclass`, not a `BaseModel`). `content_type` is a hint passed to the adapter, not a route-level dispatch key — each per-library adapter validates the content type it was wired for and raises `UnsupportedFileType` outside its domain. OCR adapters validate `options.languages` and raise `ExtractionOptionsRequired` (a `CustomError` — see [`./py-errors.md`](./py-errors.md)) when missing. See [Pitfalls](#pitfalls).
 
 Keep `metadata` simple and typed: scalar values or compact tuples such as normalized bbox coordinates. Promote large nested structures to explicit domain fields instead of hiding them in `metadata`.
 

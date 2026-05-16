@@ -359,7 +359,7 @@ async def rate_limit_handler(request: Request, exc: RateLimitExceeded) -> JSONRe
     )
 ```
 
-Keep the response shape consistent with `python-guidelines.md` (Appendix → Exception Handling).
+Keep the response shape consistent with [`./py-errors.md`](./py-errors.md).
 
 ## Async And WebSockets
 

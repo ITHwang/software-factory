@@ -13,7 +13,7 @@ How to set up a Python development environment on macOS or Ubuntu using a layere
 
 **Don't use this for:**
 - linter / formatter / typechecker / CI setup → `./py-setup-toolchains.md`
-- repo-wide Python conventions (version, frameworks) → `./python-guidelines.md`
+- repo-wide Python conventions (version, frameworks) → `./README.md`
 
 ## Table of Contents
 

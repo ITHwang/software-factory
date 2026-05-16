@@ -228,7 +228,7 @@ For depth — Protocol vs ABC vs mixin, `@runtime_checkable` caveats, default me
 
 ## See Also
 
-- `[./python-guidelines.md](./python-guidelines.md)` — overall typing conventions and Data Modeling & Validation defaults.
+- `[./README.md](./README.md)` — Python folder index.
 - `[./abstractions.md](./abstractions.md)` — Protocol, ABC, mixin, and composition in depth.
 - `[./preprocessor-pipeline.md](./preprocessor-pipeline.md)` — `StrEnum` + `to_class()` dispatch as a worked example.
 - `[./langgraph-graph-architecture.md](./langgraph-graph-architecture.md)` — `TypedDict` as graph state schema.

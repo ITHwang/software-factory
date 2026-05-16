@@ -17,7 +17,7 @@ Lightweight ports-and-adapters. Three layers: **entities**, **services + ports**
 - persistence-layer mechanics (SQLAlchemy, repositories, transactions) -> `./sqlalchemy.md`
 - LLM capability ports with Langfuse-backed prompt templates -> `./langfuse.md`
 - DI container wiring details -> `./dependency-injector.md`
-- tooling baseline (Python version, ruff, FastAPI, pytest) -> `./python-guidelines.md`
+- tooling baseline (Python version, ruff, FastAPI, pytest) -> `./README.md`
 
 ## Table of Contents
 
@@ -188,7 +188,7 @@ Lightweight infra clients (DB session wrappers, SDK wrappers, HTTP clients) live
 Services are framework-agnostic. The boundary is sharp.
 
 - Services receive request data as plain DTOs / Pydantic schemas / primitive args, not as `Request` objects.
-- Services do not depend on `fastapi.Depends`, `fastapi.HTTPException`, or `fastapi.status` — they raise domain errors (`CustomError` subclasses, see `./python-guidelines.md` Exception Handling) and let global exception handlers translate to HTTP.
+- Services do not depend on `fastapi.Depends`, `fastapi.HTTPException`, or `fastapi.status` — they raise domain errors (`CustomError` subclasses, see [`./py-errors.md`](./py-errors.md)) and let global exception handlers translate to HTTP.
 - Routes translate domain results into response schemas and domain errors into HTTP responses. The route is the only layer that legally imports from `fastapi`.
 - A grep for `from fastapi` in `services/` should return nothing. Treat hits as review blockers.
 
@@ -213,7 +213,8 @@ Both exceptions exist because the underlying state is **strict request-scoped**.
 - [./dependency-injector.md](./dependency-injector.md) — DI wiring patterns.
 - [./sqlalchemy.md](./sqlalchemy.md) — persistence layer in this style (`RDBClient`, `UserRepository`).
 - [./langfuse.md](./langfuse.md) — LLM capability ports with Langfuse-backed prompt templates.
-- [./python-guidelines.md](./python-guidelines.md) — Python tooling baseline and exception-handling convention.
+- [./README.md](./README.md) — Python folder index.
+- [./py-errors.md](./py-errors.md) — `CustomError` discipline and exception-handling convention.
 
 ## Anti-Patterns
 

@@ -13,7 +13,7 @@ How to wire ruff (lint + format), mypy (typecheck), pre-commit (git hooks), and 
 
 **Don't use this for:**
 - installing the Python runtime / setting up `uv` itself → `./py-setup-environments.md`
-- language-level conventions (version, framework choices) → `./python-guidelines.md`
+- language-level conventions (version, framework choices) → `./README.md`
 - API test patterns → `./python-tests.md`
 
 ## Table of Contents
